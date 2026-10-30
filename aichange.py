@@ -209,10 +209,28 @@ class Changer:
             full, how = self._back(im, r, upscaler, status)
             return ai._paste(im, full.convert("RGB"), mask, (0, 0) + im.size), ("NVIDIA",), "Method: recolor (InstructPix2Pix in mask) + " + how, instr
         p, neg = redraw_prompt(analysis, tgt, rep)
-        mk = redraw_mask(im, mask, tgt)
-        r, d = ai.change(im, mk, p, steps=40, strength=1.0, guidance=7.5, progress=progress, status=status, negative=neg, grow=15)
-        note = "" if m == "Redraw" else " (recolor needs NVIDIA)"
-        return r, d, "Method: redraw (inpaint)" + note, p
+        garment = is_garment(tgt, rep)
+        mk, soft = (outfit_mask(im, mask, tgt) if garment else (redraw_mask(im, mask, tgt), None)); hard = mk
+        col = color_of(rep)
+        if not (garment and col):
+            r, d = ai.change(im, mk, p, steps=40, strength=1.0, guidance=7.5, progress=progress, status=status, negative=neg, grow=15)
+            note = "" if m == "Redraw" else " (recolor needs NVIDIA)"
+            return r, d, "Method: redraw (inpaint)" + note, p
+        # clothing + a colour: several candidates, keep the one whose garment pixels best match the colour,
+        # and only ever composite inside the clothing mask (body outline stays the original pixels)
+        best = None; N = 4
+        for i in range(N):
+            if status: status(f"Drawing version {i + 1} of {N}...")
+            r, d = ai.change(im, mk, p, steps=40, strength=1.0, seed=1 + i * 7, guidance=8.5, progress=progress, status=None, negative=neg, grow=3)
+            r = Image.composite(r.convert("RGB"), im.convert("RGB"), soft)
+            sc = color_score(r, hard, col)
+            logging.info("outfit candidate %d score %.3f", i, sc)
+            if best is None or sc > best[0]: best = (sc, r, d)
+        sc, r, d = best; how = f"Method: redraw (inpaint, best of {N}, colour match {sc:.2f})"
+        if sc < COLOR_OK:
+            r = recolor_fill(im.convert("RGB"), hard, col); how += " -> too far off, used recolor of the original outfit instead"
+        if im.mode == "RGBA": r = r.convert("RGBA"); r.putalpha(im.getchannel("A"))
+        return r, d, how, p
 
     def _back(self, im, out, upscaler, status):
         W, H = im.size; how = "Lanczos"; f = max(W / out.size[0], H / out.size[1])
@@ -346,7 +364,12 @@ def redraw_prompt(analysis, tgt, rep):
     old = [tgt or ""]
     for w in re.findall(r"\b(?:\w+\s)?(?:space ?suit|uniform|suit|jacket|coat|shirt|scrubs|dress|apron)\b", analysis or "", re.I)[:3]:
         if w.lower() not in rep.lower(): old.append(w.lower())
-    neg = ", ".join([x for x in old if x] + ["blurry, deformed, low quality, extra limbs, bad anatomy"])
+    col = color_of(rep)
+    if garment and col:
+        p = ", ".join([f"wearing a {rep}", f"{col} {col} fabric", f"solid {col} {rep}", style.split(",")[0], "flat colors, high quality"])
+        others = [c for c in ("white", "brown", "beige", "tan", "skin tone", "nude", "flesh", "black", "grey", "blue", "green", "yellow", "pink", "orange", "purple") if c not in col]
+        old += [", ".join(others), "skin tone clothes, bare skin, nude"]
+    neg = ", ".join([x for x in old if x] + ["blurry, deformed, low quality, extra limbs, bad anatomy, changed body shape"])
     return p, neg
 
 def redraw_mask(im, mask, tgt):
@@ -391,3 +414,93 @@ def targets_for(tgt, analysis=""):
     for w in re.findall(r"\b(?:\w+\s)?(?:space ?suit|suit|dress|jacket|shirt|coat|uniform)\b", analysis, re.I)[:2]:
         if any(k in t for k in ("outfit", "cloth", "suit", "dress", "jacket", "shirt", "coat", "uniform")): out.append(w)
     return list(dict.fromkeys(out))
+
+
+# ---------------- clothing changes: whole-outfit mask, colour pick, recolor fallback ----------------
+COLOR_RGB = {"red": (205, 20, 35), "blue": (30, 70, 200), "green": (30, 150, 60), "yellow": (240, 210, 30), "orange": (240, 120, 20),
+             "purple": (120, 40, 170), "violet": (140, 60, 200), "pink": (240, 90, 160), "black": (20, 20, 22), "white": (245, 245, 245),
+             "grey": (128, 128, 128), "gray": (128, 128, 128), "brown": (110, 65, 30), "navy": (20, 30, 90), "teal": (0, 128, 128),
+             "cyan": (0, 190, 220), "magenta": (210, 0, 150), "maroon": (110, 15, 25), "turquoise": (40, 200, 190), "gold": (212, 175, 55),
+             "golden": (212, 175, 55), "silver": (190, 190, 195), "beige": (220, 200, 165)}
+COLOR_OK = 0.6
+GARMENT = r"\b(outfit|clothes|clothing|shirt|top|dress|jacket|coat|suit|uniform|pants|skirt|blouse|sweater|hoodie|gown|robe|kimono|bikini|swimsuit)\b"
+def is_garment(tgt, rep): return bool(re.search(GARMENT, f"{tgt or ''} {rep or ''}", re.I))
+def color_of(rep):
+    for w in re.findall(r"[a-z]+", (rep or "").lower()):
+        if w in COLOR_RGB: return w
+    return None
+
+def _seg():
+    global _SEG
+    try: return _SEG
+    except NameError: pass
+    try: _SEG = Seg(("GPU", "CPU"))
+    except Exception: logging.exception("clipseg for outfit mask"); _SEG = None
+    return _SEG
+
+def outfit_mask(im, mask, tgt):
+    """-> (hard clothing mask, soft edge mask). Coarse area = union of the given mask, SegFormer clothes classes
+    (upper-clothes/dress/skirt/pants) and CLIPSeg 'outfit'; face/hair/arms/legs/skin are cut out; then the mask is
+    snapped to the garment's own colour so it follows the original outline exactly (the body is never redrawn)."""
+    from PIL import ImageFilter
+    W, H = im.size; u = np.asarray(mask.convert("L")) > 127; prot = np.zeros((H, W), bool); seg_clothes = np.zeros((H, W), bool)
+    try:
+        import bodyparse
+        if bodyparse.available():
+            hn = bodyparse.net("human-parse"); lab = hn.seg(im)
+            seg_clothes = np.isin(lab, hn.ids(["upper-clothes", "dress", "skirt", "pants", "belt"])); u |= seg_clothes
+            prot |= np.isin(lab, hn.ids(["face", "hair", "left-arm", "right-arm", "left-leg", "right-leg"]))
+    except Exception: logging.exception("outfit_mask bodyparse")
+    s = _seg()
+    def cs(words, lo, frac):
+        p = np.max([s.probs(im, t) for t in words], axis=0)
+        return np.asarray(Image.fromarray(((p > max(lo, p.max() * frac)) * 255).astype(np.uint8)).resize((W, H), Image.BILINEAR)) > 127
+    if s is not None:
+        try:
+            u |= cs(("outfit", "clothing", "dress", "shirt", "skirt", "uniform"), 0.2, 0.35)
+            prot |= cs(("face", "hair"), 0.35, 0.5)
+        except Exception: logging.exception("outfit_mask clipseg")
+    g = max(3, int(min(W, H) * 0.006))
+    coarse = np.asarray(grow(Image.fromarray((u * 255).astype(np.uint8)), g * 4)) > 127
+    core = u & ~prot
+    a = np.asarray(im.convert("RGB"), np.float32)
+    if core.sum() > 200:
+        # garment colour = dominant colour of the core (median of its brighter half avoids line art / shadows)
+        px = a[core]; lum = px.mean(1); ref = np.median(px[lum >= np.median(lum)], 0)
+        d = np.sqrt(((a - ref) ** 2).sum(-1))
+        sat = a.max(-1) - a.min(-1); rsat = ref.max() - ref.min()
+        ok = (d < 70) | ((np.abs(sat - rsat) < 40) & (np.abs(a.mean(-1) - ref.mean()) < 80) & (a.mean(-1) > 60))  # same fabric in shadow
+        m = ok & coarse & ~prot
+        mi = Image.fromarray((m * 255).astype(np.uint8))
+        k = g * 2 + 1  # close: pulls in line art / seams / badge inside the garment, not the outer body outline
+        mi = mi.filter(ImageFilter.MaxFilter(k)).filter(ImageFilter.MinFilter(k)).filter(ImageFilter.MedianFilter(5))
+        hard = np.asarray(mi) > 127
+        hard &= ~prot
+    else:
+        hard = np.asarray(grow(Image.fromarray((u * 255).astype(np.uint8)), g)) > 127
+        hard &= ~prot
+    hard = Image.fromarray((hard * 255).astype(np.uint8))
+    return hard, hard.filter(ImageFilter.GaussianBlur(1.2))
+
+def color_score(img, mask, col):
+    """0..1: how close the masked pixels are to the requested colour (hue for chromatic colours, value for black/white/grey)."""
+    import colorsys
+    m = np.asarray(mask) > 127
+    if not m.any(): return 0.0
+    hsv = np.asarray(img.convert("RGB").convert("HSV"), np.float32)[m] / 255.0
+    th, ts, tv = colorsys.rgb_to_hsv(*[c / 255 for c in COLOR_RGB[col]])
+    if ts < 0.15:  # achromatic
+        return float(np.mean((hsv[:, 1] < 0.25) & (np.abs(hsv[:, 2] - tv) < 0.3)))
+    dh = np.abs(hsv[:, 0] - th); dh = np.minimum(dh, 1 - dh)
+    ok = (dh < 0.06) & (hsv[:, 1] > 0.35) & (hsv[:, 2] > 0.15)
+    return float(np.mean(ok))
+
+def recolor_fill(img, mask, col):
+    """Paint the masked garment in the target colour, keeping the original shading and line art."""
+    a = np.asarray(img.convert("RGB"), np.float32); m = (np.asarray(mask.filter(__import__("PIL.ImageFilter").ImageFilter.GaussianBlur(1)), np.float32) / 255.0)[..., None]
+    lum = (0.299 * a[..., 0] + 0.587 * a[..., 1] + 0.114 * a[..., 2])[..., None] / 255.0
+    ref = np.percentile(lum[m[..., 0] > 0.5], 90) if (m > 0.5).any() else 1.0
+    shade = np.clip(lum / max(ref, 1e-3), 0, 1.15)
+    tgt = np.array(COLOR_RGB[col], np.float32)[None, None] * shade
+    out = a * (1 - m) + np.clip(tgt, 0, 255) * m
+    return Image.fromarray(out.astype(np.uint8))
