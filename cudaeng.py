@@ -122,3 +122,30 @@ def esr_tile(tile):
         x = (torch.from_numpy(tile).cuda().permute(2, 0, 1)[None].half() / 255.0).contiguous(memory_format=torch.channels_last)
         y = m(x)[0].clamp_(0, 1).mul_(255).add_(0.5).byte().permute(1, 2, 0).cpu().numpy()
     return y
+
+# ---------------- ControlNet inpaint: new garment drawn inside the clothing mask, outline held by a lineart map ----------------
+CN_BASE = "Lykon/dreamshaper-8-inpainting"  # SD1.5 inpainting fine-tune, much better at anime/illustration (CreativeML OpenRAIL-M)
+CN_REPO = "lllyasviel/control_v11p_sd15s2_lineart_anime"
+_cn = {"pipe": None}
+def _cn_pipe(status=None):
+    import torch, diffusers
+    if _cur["name"] == "cn": return _cur["pipe"]
+    _cur["pipe"] = None; _cur["name"] = None; torch.cuda.empty_cache()
+    if status: status("Loading ControlNet inpaint on NVIDIA (first time downloads ~2.7 GB)...")
+    t = time.time()
+    try: cn = diffusers.ControlNetModel.from_pretrained(CN_REPO, torch_dtype=torch.float16, cache_dir=HF, variant="fp16")
+    except Exception: cn = diffusers.ControlNetModel.from_pretrained(CN_REPO, torch_dtype=torch.float16, cache_dir=HF)
+    kw = dict(controlnet=cn, torch_dtype=torch.float16, cache_dir=HF, safety_checker=None, requires_safety_checker=False)
+    try: p = diffusers.StableDiffusionControlNetInpaintPipeline.from_pretrained(CN_BASE, variant="fp16", **kw)
+    except Exception: p = diffusers.StableDiffusionControlNetInpaintPipeline.from_pretrained(CN_BASE, **kw)
+    p = p.to("cuda"); p.set_progress_bar_config(disable=True)
+    _cur.update(name="cn", pipe=p); logging.info("cuda controlnet inpaint loaded %.1fs", time.time() - t); return p
+
+def inpaint_cn(img, mask, control, prompt, negative, steps=30, guidance=8.0, cn_scale=0.8, seed=1, progress=None, status=None):
+    """img/mask/control are the same size (multiple of 8). Returns the generated image at that size."""
+    import torch
+    with _lock:
+        p = _cn_pipe(status)
+        return p(prompt, image=img, mask_image=mask, control_image=control, negative_prompt=negative, num_inference_steps=steps,
+                 guidance_scale=guidance, controlnet_conditioning_scale=cn_scale, strength=1.0, width=img.size[0], height=img.size[1],
+                 generator=torch.Generator("cuda").manual_seed(int(seed)), callback_on_step_end=_cb(progress, steps)).images[0]

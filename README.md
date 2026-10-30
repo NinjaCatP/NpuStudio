@@ -41,6 +41,8 @@ Each model keeps its own license — please check the model card before using ou
 | IS-Net general-use (DIS, via rembg) | Background removal | Apache-2.0 |
 | LaMa (Carve/LaMa-ONNX) | AI erase | Apache-2.0 |
 | stable-diffusion-v1-5/stable-diffusion-inpainting | AI Change (redraw) | CreativeML OpenRAIL-M |
+| lllyasviel/control_v11p_sd15s2_lineart_anime | AI Change (ControlNet redraw guidance) | OpenRAIL |
+| Lykon/dreamshaper-8-inpainting | AI Change (redraw base model) | CreativeML OpenRAIL-M |
 | timbrooks/instruct-pix2pix | AI Change (recolor) | MIT |
 | CIDAS/clipseg-rd64-refined | Auto-masks | Apache-2.0 |
 | mattmdjaga/segformer_b2_clothes | Clothing/body parsing | see model card |

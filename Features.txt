@@ -151,6 +151,13 @@ CHIP MONITOR (window opened from the top bar)
     The top line shows "CPU package power" (the whole processor, RAPL) on its own.
 * Tip: leave it open while running a job to see which chip is doing the work.
 
+* AI Change redraw engine (NVIDIA): any typed change - clothing ("outfit to red dress"), objects ("hat to a crown"),
+  background ("make background a beach"), hair style ("make hair short and black"), pose ("make her wave",
+  "arms crossed") and held items ("holding a coffee cup") - is drawn with ControlNet (anime lineart) + DreamShaper 8 inpainting.
+  Same-shape swaps keep the original outline; shape changes use looser guidance. It draws 4 versions and keeps
+  the one that really changed (and matches the colour you asked for). Recolor is only a clearly-labelled last resort.
+  Body shape/proportions are never changed.
+
 ------------------------------------------------------------
 NOTES / LIMITS
 ------------------------------------------------------------

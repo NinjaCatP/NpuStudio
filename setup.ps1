@@ -25,6 +25,9 @@ if (Get-CimInstance Win32_VideoController | Where-Object { $_.Name -match 'NVIDI
   & $uv pip install --python "$app\venv\Scripts\python.exe" torch --index-url https://download.pytorch.org/whl/cu128 2>&1 | Tee-Object -FilePath $log -Append
   & $uv pip install --python "$app\venv\Scripts\python.exe" diffusers transformers accelerate safetensors 2>&1 | Tee-Object -FilePath $log -Append
   & $uv pip install --python "$app\venv\Scripts\python.exe" nvidia-ml-py 2>&1 | Tee-Object -FilePath $log -Append   # NVIDIA power/temp in Chip Monitor
+  # AI change redraw engine: ControlNet anime-lineart (fp16, ~0.7 GB) -> models\hf
+  Log 'Downloading ControlNet lineart (~0.7 GB) + DreamShaper 8 inpainting (~2.1 GB) for AI change...'
+  & "$app\venv\Scripts\python.exe" -c "from huggingface_hub import snapshot_download as d; d('lllyasviel/control_v11p_sd15s2_lineart_anime', cache_dir=r'$app\models\hf', allow_patterns=['config.json','diffusion_pytorch_model.fp16.safetensors']); d('Lykon/dreamshaper-8-inpainting', cache_dir=r'$app\models\hf', allow_patterns=['*.json','*.txt','unet/*.fp16.safetensors','vae/*.fp16.safetensors','text_encoder/*.fp16.safetensors'])" 2>&1 | Tee-Object -FilePath $log -Append
 }
 New-Item -ItemType Directory -Force "$app\models" | Out-Null
 $base = 'https://storage.openvinotoolkit.org/repositories/open_model_zoo/2023.0/models_bin/1/single-image-super-resolution-1032/FP16/single-image-super-resolution-1032'

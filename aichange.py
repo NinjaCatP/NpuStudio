@@ -209,26 +209,59 @@ class Changer:
             full, how = self._back(im, r, upscaler, status)
             return ai._paste(im, full.convert("RGB"), mask, (0, 0) + im.size), ("NVIDIA",), "Method: recolor (InstructPix2Pix in mask) + " + how, instr
         p, neg = redraw_prompt(analysis, tgt, rep)
-        garment = is_garment(tgt, rep)
-        mk, soft = (outfit_mask(im, mask, tgt) if garment else (redraw_mask(im, mask, tgt), None)); hard = mk
-        col = color_of(rep)
-        if not (garment and col):
-            r, d = ai.change(im, mk, p, steps=40, strength=1.0, guidance=7.5, progress=progress, status=status, negative=neg, grow=15)
-            note = "" if m == "Redraw" else " (recolor needs NVIDIA)"
-            return r, d, "Method: redraw (inpaint)" + note, p
-        # clothing + a colour: several candidates, keep the one whose garment pixels best match the colour,
-        # and only ever composite inside the clothing mask (body outline stays the original pixels)
-        best = None; N = 4
-        for i in range(N):
-            if status: status(f"Drawing version {i + 1} of {N}...")
-            r, d = ai.change(im, mk, p, steps=40, strength=1.0, seed=1 + i * 7, guidance=8.5, progress=progress, status=None, negative=neg, grow=3)
-            r = Image.composite(r.convert("RGB"), im.convert("RGB"), soft)
-            sc = color_score(r, hard, col)
-            logging.info("outfit candidate %d score %.3f", i, sc)
-            if best is None or sc > best[0]: best = (sc, r, d)
-        sc, r, d = best; how = f"Method: redraw (inpaint, best of {N}, colour match {sc:.2f})"
-        if sc < COLOR_OK:
-            r = recolor_fill(im.convert("RGB"), hard, col); how += " -> too far off, used recolor of the original outfit instead"
+        garment = is_garment(tgt, rep); col = color_of(rep)
+        if tgt == "arms": hard, soft = pose_mask(im, mask); garment = False
+        elif re.fullmatch(r"(?i)\s*hair\s*", tgt or ""): hard, soft = hair_mask(im, mask)
+        elif garment: hard, soft = outfit_mask(im, mask, tgt)
+        else:
+            hard = redraw_mask(im, mask, tgt).point(lambda v: 255 if v > 100 else 0); soft = hard.filter(__import__("PIL.ImageFilter").ImageFilter.GaussianBlur(1.5))
+            if re.search(r"\b(background|sky|wall|scene)\b", tgt or "", re.I):  # never paint over the person
+                try:
+                    import bodyparse
+                    if bodyparse.available():
+                        hn = bodyparse.net("human-parse"); per = np.asarray(Image.fromarray(((hn.seg(im) > 0) * 255).astype(np.uint8)).filter(__import__("PIL.ImageFilter").ImageFilter.MaxFilter(5))) > 127
+                        hard = Image.fromarray(np.where(per, 0, np.asarray(hard)).astype(np.uint8)); soft = hard.filter(__import__("PIL.ImageFilter").ImageFilter.GaussianBlur(1.5))
+                except Exception: logging.exception("background protect")
+                try:
+                    sg = _seg()
+                    if sg is not None:
+                        q = np.max([sg.probs(im, t) for t in ("person", "hair", "hat", "girl")], axis=0)
+                        per = np.asarray(Image.fromarray(((q > max(0.25, q.max() * 0.35)) * 255).astype(np.uint8)).resize(im.size, Image.BILINEAR).filter(__import__("PIL.ImageFilter").ImageFilter.MaxFilter(9))) > 127
+                        hard = Image.fromarray(np.where(per, 0, np.asarray(hard)).astype(np.uint8)); soft = hard.filter(__import__("PIL.ImageFilter").ImageFilter.GaussianBlur(1.5))
+                except Exception: logging.exception("background protect clipseg")
+        if not hard.getbbox(): hard, soft = mask.convert("L"), mask.convert("L")
+        ctl = control_mode(tgt, rep)
+        cn_ok = False
+        try:
+            import cudaeng; cn_ok = cudaeng.available() and bool(devices.plan("inpaint")) and devices.plan("inpaint")[0] == "NVIDIA"
+        except Exception: pass
+        best = None; N = 4; d = ("NVIDIA",)
+        if cn_ok:
+            # general engine: ControlNet (anime lineart) inpaint inside the target mask. "keep" = outline held, interior
+            # lines removed (same-shape swaps); "loose" = only the surroundings guide it, so the shape may change inside the mask
+            cp, cneg = change_prompt(analysis, tgt, rep, col, garment)
+            for i in range(N):
+                if status: status(f"Drawing '{rep}' - version {i + 1} of {N} (ControlNet {ctl}, NVIDIA)...")
+                try: r = cn_redraw(im, hard, soft, cp, cneg, seed=11 + i * 7, progress=progress, status=status, mode=ctl)
+                except Exception: logging.exception("controlnet redraw"); break
+                cs_ = color_score(r, hard, col) if col else 1.0; ch = changed_score(im, r, hard)
+                sc = cs_ * (1.0 if ch > 0.35 else 0.4)
+                logging.info("redraw candidate %d colour %.2f changed %.2f -> %.2f", i, cs_, ch, sc)
+                if os.environ.get("NPUSTUDIO_DEBUG"): r.save(f"cand_{i}.jpg", quality=85)
+                if best is None or sc > best[0]: best = (sc, r, d, cs_, ch)
+            p = cp
+        if best is None:  # no NVIDIA: plain inpaint (OpenVINO / CUDA), single pass unless a colour can be checked
+            for i in range(N if col else 1):
+                if status: status(f"Drawing version {i + 1}...")
+                r, d = ai.change(im, hard, p, steps=40, strength=1.0, seed=1 + i * 7, guidance=8.0, progress=progress, status=None, negative=neg, grow=5)
+                r = Image.composite(r.convert("RGB"), im.convert("RGB"), soft)
+                cs_ = color_score(r, hard, col) if col else 1.0; ch = changed_score(im, r, hard); sc = cs_ * (1.0 if ch > 0.35 else 0.4)
+                if best is None or sc > best[0]: best = (sc, r, d, cs_, ch)
+        sc, r, d, cs_, ch = best
+        how = f"Method: redraw ({'ControlNet ' + ctl if cn_ok else 'inpaint'}, best of {N}, changed {ch:.2f}" + (f", colour {cs_:.2f})" if col else ")")
+        if sc < COLOR_OK and col and (garment or re.search(r"\bhair\b", f"{tgt} {rep}", re.I)) and not re.search(SHAPE_CHANGE, rep or "", re.I):
+            r = recolor_fill(im.convert("RGB"), hard, col); how = f"Method: LAST RESORT recolor of the original (redraw failed: changed {ch:.2f}, colour {cs_:.2f})"
+        elif sc < COLOR_OK: how += " - weak result, try another wording or brush the area"
         if im.mode == "RGBA": r = r.convert("RGBA"); r.putalpha(im.getchannel("A"))
         return r, d, how, p
 
@@ -305,8 +338,19 @@ def grow(mask, px):
 GLOBAL_WORDS = r"\b(night|nighttime|day|daytime|sunset|sunrise|winter|summer|autumn|fall|snow|rain|watercolou?r|painting|oil|sketch|cartoon|anime|pixel|style|vintage|black and white|b&w|cinematic|lighting|mood|whole|everything|entire|image|picture|photo)\b"
 POSS = r"(?:the\s+|her\s+|his\s+|their\s+|its\s+|my\s+|your\s+|this\s+|that\s+)?"
 SCENE = r"(it|this|that|the image|the picture|the photo|everything|image|picture|photo|the scene|scene|the whole (?:image|picture|photo))"
+POSE_TXT = {"wave": "waving with one hand raised", "waving": "waving with one hand raised", "arms": "arms crossed over chest",
+            "arm": "arms crossed over chest", "cross": "arms crossed over chest", "crossed": "arms crossed over chest",
+            "hands": "hands on hips", "hand": "hands on hips", "thumbs": "giving a thumbs up", "thumb": "giving a thumbs up",
+            "peace": "making a peace sign with her hand", "salute": "saluting", "saluting": "saluting", "point": "pointing with her finger",
+            "pointing": "pointing with her finger", "raise": "one arm raised", "raised": "one arm raised", "raises": "one arm raised"}
 def parse(instr):
     """-> (target or None, replacement, kind) where kind in remove/replace/global."""
+    _p = re.search(r"(?i)\b(wav(e|ing)|arms? crossed|cross(ed)? (her|his|their) arms|hands? on (her|his) hips|thumbs? up|peace sign|salut(e|ing)|point(ing)?|raise[sd]? (her|his|their|an?) (arm|hand)s?)\b", instr or "")
+    if _p: return "arms", POSE_TXT.get(_p.group(1).lower().split()[0], _p.group(0).lower()), "replace"
+    _h = re.search(r"(?i)\b(?:hold|holding|hold up|give (?:her|him|them) an?)\s+(?:an?\s+|the\s+|some\s+)?([a-z \-]+)$", instr or "")
+    if _h: return "arms", f"holding a {_h.group(1).strip()} in her hand", "replace"
+    _m = re.match(r"(?i)^\s*(?:make|turn)\s+(?:the\s+|her\s+|his\s+|their\s+)?(hair|outfit|dress|shirt|hat|background|sky)\s+(?!to\b|into\b|an?\b)([a-z ,\-]+?)\s*$", instr or "")
+    if _m: return _m.group(1).lower(), f"{_m.group(2).strip()} {_m.group(1).lower()}", "replace"
     s = instr.strip().rstrip(".!").strip(); s = re.sub(r"^(?:please|can you|could you)\s+", "", s, flags=re.I)
     s = fix_verb(s)
     if re.search(r"\b(whole|entire) (image|picture|photo|scene)\b", s, re.I): return None, s, "global"
@@ -351,6 +395,7 @@ COLORS = r"(red|blue|green|yellow|orange|purple|violet|pink|black|white|grey|gra
 def method_for(rep):
     """'Recolor' when the new value is only colours/materials/adjectives ("blue", "dark red", "leather"), else 'Redraw'."""
     words = [w for w in re.findall(r"[a-z\-]+", (rep or "").lower()) if w not in ("a", "an", "the", "and", "with", "more", "very", "color", "colour", "shade", "of", "in", "to")]
+    words = [w for w in words if not re.fullmatch(r"(hair|outfit|clothes|background|sky)", w)] or words
     if words and all(re.fullmatch(COLORS, w) for w in words): return "Recolor"
     return "Redraw"
 
@@ -492,7 +537,7 @@ def color_score(img, mask, col):
     if ts < 0.15:  # achromatic
         return float(np.mean((hsv[:, 1] < 0.25) & (np.abs(hsv[:, 2] - tv) < 0.3)))
     dh = np.abs(hsv[:, 0] - th); dh = np.minimum(dh, 1 - dh)
-    ok = (dh < 0.06) & (hsv[:, 1] > 0.35) & (hsv[:, 2] > 0.15)
+    ok = (dh < 0.08) & (hsv[:, 1] > 0.25) & (hsv[:, 2] > 0.12)
     return float(np.mean(ok))
 
 def recolor_fill(img, mask, col):
@@ -504,3 +549,123 @@ def recolor_fill(img, mask, col):
     tgt = np.array(COLOR_RGB[col], np.float32)[None, None] * shade
     out = a * (1 - m) + np.clip(tgt, 0, 255) * m
     return Image.fromarray(out.astype(np.uint8))
+
+
+SHAPE_CHANGE = r"\b(short|long|longer|shorter|curly|straight|wavy|bun|ponytail|braid|braids|bald|crown|hoodie|jacket|coat|cape|hat|helmet|wings|beach|forest|city|space|mountains?|ocean|sea|garden|castle|sky|bigger|smaller|replace|swap)\b"
+def control_mode(tgt, rep):
+    """'keep' = hold the target's outline (same-shape swap, e.g. outfit -> dress); 'loose' = new shape allowed inside the mask."""
+    t = f"{tgt or ''}".lower()
+    if t == "arms": return "loose"
+    if re.search(r"\b(background|sky|wall|scene|hair|hat|cap|helmet)\b", t): return "loose"
+    if re.search(r"\b(hoodie|jacket|coat|cape|wings|crown)\b", rep or "", re.I): return "loose"
+    if is_garment(tgt, rep): return "keep"
+    return "loose" if re.search(SHAPE_CHANGE, rep or "", re.I) else "keep"
+
+def change_prompt(analysis, tgt, rep, col, garment):
+    anime = bool(re.search(ILLU, analysis or "", re.I))
+    style = "anime illustration, clean line art, flat cel shading" if anime else "photo, realistic, natural lighting"
+    t = (tgt or "").lower()
+    if garment: subj = f"a woman wearing a plain {rep}, simple solid-color {rep}" + (f", {col} {col} fabric, solid {col}" if col else "")
+    elif t == "arms": subj = f"a woman {rep}, bare arm, detailed hand, five fingers"
+    elif re.search(r"\bhair\b", t): subj = f"{rep} hair, {rep} hairstyle"
+    elif re.search(r"\b(background|sky|wall|scene)\b", t): subj = f"{rep} background, {rep} scenery, detailed"
+    else: subj = f"{rep}, a {rep}" + (f", {col} {col}" if col else "")
+    p = f"{subj}, {style}, high quality"
+    others = ", ".join(c for c in ("white", "brown", "beige", "black", "grey", "blue", "green", "yellow", "pink", "purple", "red") if c != col) if col else ""
+    old = [w for w in re.findall(r"\b(?:\w+\s)?(?:uniform|suit|jacket|coat|shirt|dress|cap|hat|helmet|wall|background)\b", analysis or "", re.I)[:3]
+           if w.lower() not in (rep or "").lower()]
+    if garment: old += ["pattern, print, text, logo, floral, graffiti", "nurse uniform", "collar", "name badge", "buttons", "zipper", "belt", "skin tone fabric", "bare skin", "nude"]
+    neg = ", ".join([x for x in [tgt if tgt and tgt.lower() not in (rep or "").lower() else "", *old, others] if x] +
+                    ["extra limbs, deformed, changed body shape, blurry, low quality"])
+    return p, neg
+
+def control_map(im, hard, mode="keep"):
+    """Anime lineart control (white lines on black) from the original: all line art outside the clothing,
+    the clothing's outer outline kept, the clothing's interior lines (collar, badge, zipper, belt) removed."""
+    from PIL import ImageFilter
+    g = np.asarray(im.convert("L"), np.float32)
+    blur = np.asarray(im.convert("L").filter(ImageFilter.GaussianBlur(3)), np.float32)
+    lines = (g < blur - 18) | (g < 60)
+    m = np.asarray(hard) > 127
+    inner = np.asarray(hard.filter(ImageFilter.MinFilter(9))) > 127
+    outline = m & ~inner
+    lines = (lines & ~inner) | outline if mode == "keep" else (lines & ~m)
+    return Image.fromarray((lines * 255).astype(np.uint8)).convert("RGB")
+
+def cn_redraw(im, hard, soft, prompt, neg, seed=1, progress=None, status=None, side=768, mode="keep"):
+    import cudaeng
+    from PIL import ImageFilter
+    W, H = im.size; bb = hard.getbbox(); pad = int(max(bb[2] - bb[0], bb[3] - bb[1]) * 0.15)
+    box = (max(0, bb[0] - pad), max(0, bb[1] - pad), min(W, bb[2] + pad), min(H, bb[3] + pad))
+    bw, bh = box[2] - box[0], box[3] - box[1]; s = side / max(bw, bh); size = (max(64, round(bw * s / 8) * 8), max(64, round(bh * s / 8) * 8))
+    src = im.convert("RGB").crop(box).resize(size, Image.LANCZOS)
+    mk = hard.filter(ImageFilter.MaxFilter(5)).crop(box).resize(size, Image.NEAREST).convert("RGB")
+    ctl = control_map(im, hard, mode).crop(box).resize(size, Image.BILINEAR)
+    out = cudaeng.inpaint_cn(src, mk, ctl, prompt, neg, seed=seed, progress=progress, status=status, cn_scale=0.8 if mode == "keep" else 0.5)
+    full = im.convert("RGB").copy(); full.paste(out.resize((bw, bh), Image.LANCZOS), box[:2])
+    return Image.composite(full, im.convert("RGB"), soft)
+
+def changed_score(orig, new, hard):
+    """0..1: how much the garment's structure changed (1 - correlation of luminance detail inside the mask).
+    A pure recolor keeps the same folds/collar/badge and scores near 0."""
+    from PIL import ImageFilter
+    m = np.asarray(hard.filter(ImageFilter.MinFilter(5))) > 127
+    if m.sum() < 100: return 0.0
+    def detail(x):
+        g = np.asarray(x.convert("L"), np.float32); b = np.asarray(x.convert("L").filter(ImageFilter.GaussianBlur(4)), np.float32)
+        return (g - b)[m]
+    a, b = detail(orig), detail(new)
+    if a.std() < 1e-3 or b.std() < 1e-3: return 1.0
+    return float(max(0.0, min(1.0, 1 - np.corrcoef(a, b)[0, 1])))
+
+
+def pose_mask(im, mask):
+    """Pose / holding changes: redraw only the arms + hands and the space around them (where a new arm position or
+    held item can go). Face and hair stay fixed; torso, legs and silhouette outside this area are untouched."""
+    from PIL import ImageFilter
+    W, H = im.size; arms = np.asarray(mask.convert("L")) > 127; prot = np.zeros((H, W), bool)
+    try:
+        import bodyparse
+        if bodyparse.available():
+            hn = bodyparse.net("human-parse"); lab = hn.seg(im)
+            arms |= np.isin(lab, hn.ids(["left-arm", "right-arm"])); prot |= np.isin(lab, hn.ids(["face", "hair"]))
+    except Exception: logging.exception("pose_mask bodyparse")
+    s = _seg()
+    if s is not None:
+        try:
+            p = np.max([s.probs(im, t) for t in ("arm", "hand", "arms")], axis=0)
+            arms |= np.asarray(Image.fromarray(((p > max(0.25, p.max() * 0.4)) * 255).astype(np.uint8)).resize((W, H), Image.BILINEAR)) > 127
+            q = np.max([s.probs(im, t) for t in ("face", "hair")], axis=0)
+            prot |= np.asarray(Image.fromarray(((q > max(0.35, q.max() * 0.5)) * 255).astype(np.uint8)).resize((W, H), Image.BILINEAR)) > 127
+        except Exception: logging.exception("pose_mask clipseg")
+    try:  # keep the torso / outfit silhouette fixed: the new arm can only go into the arm area and the space beside it
+        body = np.asarray(outfit_mask(im, Image.new("L", im.size, 0), "outfit")[0]) > 127
+        prot |= body & ~arms
+    except Exception: logging.exception("pose_mask body protect")
+    g = max(8, int(min(W, H) * 0.06))
+    m = np.asarray(grow(Image.fromarray((arms * 255).astype(np.uint8)), g)) > 127
+    hard = Image.fromarray(((m & ~prot) * 255).astype(np.uint8)).filter(ImageFilter.MedianFilter(5))
+    return hard, hard.filter(ImageFilter.GaussianBlur(2))
+
+
+def hair_mask(im, mask):
+    """Whole hair (CLIPSeg + human parser, also long hair over the shoulders), face cut out."""
+    from PIL import ImageFilter
+    W, H = im.size; u = np.asarray(mask.convert("L")) > 127; prot = np.zeros((H, W), bool)
+    try:
+        import bodyparse
+        if bodyparse.available():
+            hn = bodyparse.net("human-parse"); lab = hn.seg(im)
+            u |= np.isin(lab, hn.ids(["hair"])); prot |= np.isin(lab, hn.ids(["face"]))
+    except Exception: logging.exception("hair_mask bodyparse")
+    s = _seg()
+    if s is not None:
+        try:
+            p = np.max([s.probs(im, t) for t in ("hair", "long hair", "colorful hair")], axis=0)
+            u |= np.asarray(Image.fromarray(((p > max(0.3, p.max() * 0.45)) * 255).astype(np.uint8)).resize((W, H), Image.BILINEAR)) > 127
+            q = np.max([s.probs(im, t) for t in ("face", "eyes")], axis=0)
+            prot |= np.asarray(Image.fromarray(((q > max(0.4, q.max() * 0.6)) * 255).astype(np.uint8)).resize((W, H), Image.BILINEAR)) > 127
+        except Exception: logging.exception("hair_mask clipseg")
+    m = np.asarray(grow(Image.fromarray((u * 255).astype(np.uint8)), max(4, int(min(W, H) * 0.01)))) > 127
+    hard = Image.fromarray(((m & ~prot) * 255).astype(np.uint8)).filter(ImageFilter.MedianFilter(5))
+    return hard, hard.filter(ImageFilter.GaussianBlur(1.5))
