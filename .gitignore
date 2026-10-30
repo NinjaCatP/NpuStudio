@@ -1,0 +1,13 @@
+models/
+venv/
+python/
+uv/
+uvcache/
+__pycache__/
+*.pyc
+*.log
+setup.done
+outputs/
+*.onnx
+*.pth
+*.zip

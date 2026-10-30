@@ -1,0 +1,328 @@
+"""Allowlisted assistant actions for NpuStudio. No arbitrary commands, no deletion, no admin."""
+import os, re, json, glob, time, difflib, subprocess, ctypes, datetime, logging, webbrowser, urllib.parse
+
+CONFIRM = {"close_app", "sleep", "restart", "shutdown"}
+NOWIN = 0x08000000  # CREATE_NO_WINDOW
+
+SETTINGS = {"wifi": "network-wifi", "wi-fi": "network-wifi", "network": "network", "bluetooth": "bluetooth",
+            "display": "display", "screen": "display", "sound": "sound", "audio": "sound", "battery": "batterysaver",
+            "power": "powersleep", "update": "windowsupdate", "updates": "windowsupdate", "windows update": "windowsupdate",
+            "apps": "appsfeatures", "notifications": "notifications", "personalization": "personalization",
+            "background": "personalization-background", "colors": "colors", "theme": "themes", "mouse": "mousetouchpad",
+            "touchpad": "devices-touchpad", "keyboard": "typing", "privacy": "privacy", "storage": "storagesense",
+            "date": "dateandtime", "time": "dateandtime", "language": "regionlanguage", "accounts": "yourinfo",
+            "printers": "printers", "night light": "nightlight", "about": "about", "vpn": "network-vpn"}
+FOLDERS = {"downloads": "Downloads", "documents": "Documents", "pictures": "Pictures", "desktop": "Desktop",
+           "music": "Music", "videos": "Videos"}
+
+TOOLS_PROMPT = """You are a helpful, concise assistant running on the user's Windows laptop.
+You can also control the laptop. When the user asks you to DO something, reply with exactly one line:
+ACTION: {"name": "<name>", "args": {...}}
+Available actions:
+open_app {"app": name} | close_app {"app": name} | open_url {"url": url} | web_search {"query": text}
+open_folder {"folder": downloads|documents|pictures|desktop|music|videos} | settings {"page": wifi|bluetooth|display|sound|battery|updates|...}
+volume {"level": 0-100} | brightness_change {"delta": -100..100} | volume_change {"delta": -100..100} | mute {} | unmute {}
+brightness {"level": 0-100} | dark_mode {"on": true|false} | screenshot {} | timer {"minutes": n, "message": text}
+battery {} | time {} | lock {} | sleep {} | restart {} | shutdown {}
+Examples:
+User: pull up the calculator -> ACTION: {"name": "open_app", "args": {"app": "calculator"}}
+User: make the screen dimmer -> ACTION: {"name": "brightness_change", "args": {"delta": -15}}
+User: I want to change my bluetooth settings -> ACTION: {"name": "settings", "args": {"page": "bluetooth"}}
+For normal questions, just answer in plain text without ACTION."""
+
+# ---------------- app index ----------------
+_apps = None
+def app_index():
+    global _apps
+    if _apps is not None: return _apps
+    idx = {}
+    for root in [os.path.join(os.environ.get("PROGRAMDATA", r"C:\ProgramData"), r"Microsoft\Windows\Start Menu\Programs"),
+                 os.path.join(os.environ.get("APPDATA", ""), r"Microsoft\Windows\Start Menu\Programs")]:
+        for p in glob.glob(os.path.join(root, "**", "*.lnk"), recursive=True):
+            n = os.path.splitext(os.path.basename(p))[0]
+            if re.search(r"uninstall|readme|help|documentation|website", n, re.I): continue
+            idx.setdefault(n.lower(), ("lnk", p, n))
+    try:
+        out = subprocess.run(["powershell", "-NoProfile", "-Command",
+                              "Get-StartApps | ForEach-Object { $_.Name + '|' + $_.AppID }"],
+                             capture_output=True, text=True, timeout=30, creationflags=NOWIN).stdout
+        for line in out.splitlines():
+            if "|" in line:
+                n, a = line.rsplit("|", 1)
+                idx.setdefault(n.strip().lower(), ("uwp", a.strip(), n.strip()))
+    except Exception: logging.exception("Get-StartApps")
+    _apps = idx; return idx
+
+def find_app(name):
+    idx = app_index(); q = name.lower().strip()
+    if q in idx: return idx[q]
+    starts = [k for k in idx if k.startswith(q)] or [k for k in idx if re.search(r"\b" + re.escape(q), k)]
+    if starts: return idx[min(starts, key=len)]
+    m = difflib.get_close_matches(q, list(idx), n=1, cutoff=0.6)
+    return idx[m[0]] if m else None
+
+# ---------------- audio / screen ----------------
+def _endpoint():
+    from pycaw.pycaw import AudioUtilities
+    sp = AudioUtilities.GetSpeakers()
+    if hasattr(sp, "EndpointVolume"): return sp.EndpointVolume
+    from ctypes import cast, POINTER
+    from comtypes import CLSCTX_ALL
+    from pycaw.pycaw import IAudioEndpointVolume
+    return cast(sp.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None), POINTER(IAudioEndpointVolume))
+
+def get_volume():
+    import comtypes; comtypes.CoInitialize()
+    e = _endpoint(); return round(e.GetMasterVolumeLevelScalar() * 100), bool(e.GetMute())
+
+def set_volume(level=None, mute=None):
+    import comtypes; comtypes.CoInitialize()
+    e = _endpoint()
+    if level is not None: e.SetMasterVolumeLevelScalar(max(0, min(100, level)) / 100.0, None)
+    if mute is not None: e.SetMute(1 if mute else 0, None)
+
+def _ps(cmd):
+    r = subprocess.run(["powershell", "-NoProfile", "-Command", cmd], capture_output=True, text=True, timeout=30, creationflags=NOWIN)
+    if r.returncode: raise RuntimeError(r.stderr.strip()[:200] or "failed")
+    return r.stdout.strip()
+
+def get_brightness():
+    return int(_ps("(Get-CimInstance -Namespace root/WMI -ClassName WmiMonitorBrightness).CurrentBrightness | Select-Object -First 1"))
+
+def set_brightness(level):
+    level = max(0, min(100, int(level)))
+    _ps(f"Get-CimInstance -Namespace root/WMI -ClassName WmiMonitorBrightnessMethods | Invoke-CimMethod -MethodName WmiSetBrightness -Arguments @{{Timeout=1;Brightness={level}}} | Out-Null")
+
+def get_dark():
+    import winreg
+    k = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize")
+    return winreg.QueryValueEx(k, "AppsUseLightTheme")[0] == 0
+
+def set_dark(on):
+    import winreg
+    k = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize", 0, winreg.KEY_SET_VALUE)
+    for n in ("AppsUseLightTheme", "SystemUsesLightTheme"): winreg.SetValueEx(k, n, 0, winreg.REG_DWORD, 0 if on else 1)
+    try:  # tell running apps the theme changed
+        ctypes.windll.user32.SendMessageTimeoutW(0xFFFF, 0x001A, 0, "ImmersiveColorSet", 2, 500, None)
+    except Exception: pass
+
+def battery():
+    class S(ctypes.Structure):
+        _fields_ = [("ac", ctypes.c_byte), ("flag", ctypes.c_byte), ("pct", ctypes.c_byte), ("r", ctypes.c_byte),
+                    ("life", ctypes.c_ulong), ("full", ctypes.c_ulong)]
+    s = S(); ctypes.windll.kernel32.GetSystemPowerStatus(ctypes.byref(s))
+    pct = s.pct & 0xFF
+    if pct == 255: return "I couldn't read the battery level."
+    return f"Battery is at {pct}%" + (" and charging." if s.ac == 1 else " (on battery).")
+
+def folder_path(name):
+    if name.lower() in ("downloads",):
+        try:
+            import winreg
+            k = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders")
+            return winreg.QueryValueEx(k, "{374DE290-123F-4565-9164-39C4925E467B}")[0]
+        except Exception: pass
+    if name.lower() in ("documents", "pictures", "music", "videos", "desktop"):
+        try:
+            import winreg
+            reg = {"documents": "Personal", "pictures": "My Pictures", "music": "My Music", "videos": "My Video", "desktop": "Desktop"}[name.lower()]
+            k = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders")
+            return winreg.QueryValueEx(k, reg)[0]
+        except Exception: pass
+    return os.path.join(os.path.expanduser("~"), FOLDERS.get(name.lower(), name))
+
+def running_images():
+    out = subprocess.run(["tasklist", "/fo", "csv", "/nh"], capture_output=True, text=True, creationflags=NOWIN).stdout
+    return sorted({l.split('","')[0].strip('"') for l in out.splitlines() if l.strip()})
+
+def find_process(name):
+    q = re.sub(r"\.exe$", "", name.lower().strip()).replace(" ", "")
+    imgs = running_images(); low = {i.lower()[:-4] if i.lower().endswith(".exe") else i.lower(): i for i in imgs}
+    if q in low: return low[q]
+    hit = [k for k in low if k.startswith(q)] or difflib.get_close_matches(q, list(low), n=1, cutoff=0.75)
+    if hit: return low[hit[0]]
+    a = find_app(name)  # e.g. "word" -> WINWORD.EXE via shortcut target
+    if a and a[0] == "lnk":
+        try:
+            import win32com.client
+            t = os.path.basename(win32com.client.Dispatch("WScript.Shell").CreateShortcut(a[1]).TargetPath).lower()
+            for i in imgs:
+                if i.lower() == t: return i
+        except Exception: pass
+    return None
+
+# ---------------- router ----------------
+NUM = r"(\d{1,3})\s*%?"
+def route(text):
+    t = text.lower().strip().rstrip(".!?")
+    t = re.sub(r"^(please |can you |could you |hey |would you )+", "", t)
+    t = re.sub(r"\s+(please|for me|now)$", "", t)
+    m = re.search(r"(?:volume|sound)\s*(?:to|at|=)?\s*" + NUM, t) or re.search(r"set (?:the )?(?:volume|sound)(?: level)? to " + NUM, t)
+    if m: return {"name": "volume", "args": {"level": int(m.group(1))}}
+    if re.search(r"\b(turn|volume|sound)\b.*\b(up|louder)\b|\blouder\b", t): return {"name": "volume_change", "args": {"delta": 10}}
+    if re.search(r"\b(turn|volume|sound)\b.*\b(down|quieter)\b|\bquieter\b|\bsofter\b", t): return {"name": "volume_change", "args": {"delta": -10}}
+    if re.fullmatch(r"(un-?mute)( (the )?(sound|volume|audio|computer|laptop|pc))?", t): return {"name": "unmute", "args": {}}
+    if re.fullmatch(r"mute( (the )?(sound|volume|audio|computer|laptop|pc))?", t): return {"name": "mute", "args": {}}
+    m = re.search(r"brightness\s*(?:to|at|=)?\s*" + NUM, t)
+    if m: return {"name": "brightness", "args": {"level": int(m.group(1))}}
+    if re.search(r"\b(brighter|brightness up|increase (the )?brightness)\b", t): return {"name": "brightness_change", "args": {"delta": 15}}
+    if re.search(r"\b(screen|display)\b.*\b(brighter|lighter)\b", t): return {"name": "brightness_change", "args": {"delta": 15}}
+    if re.search(r"\b(screen|display)\b.*\b(darker|dimmer)\b", t): return {"name": "brightness_change", "args": {"delta": -15}}
+    if re.search(r"\b(dimmer|dim (the )?screen|brightness down|decrease (the )?brightness|lower (the )?brightness)\b", t): return {"name": "brightness_change", "args": {"delta": -15}}
+    if re.search(r"dark (mode|theme)", t):
+        return {"name": "dark_mode", "args": {"on": not re.search(r"\b(off|disable|turn off|stop)\b", t)}}
+    if re.search(r"light (mode|theme)", t):
+        return {"name": "dark_mode", "args": {"on": bool(re.search(r"\b(off|disable)\b", t))}}
+    if re.search(r"\b(take|grab|capture) (a )?(screenshot|screen ?shot)|^screenshot$", t): return {"name": "screenshot", "args": {}}
+    m = re.search(r"(?:set )?(?:a )?(?:timer|reminder|remind me)\b.*?(\d+)\s*(min|minute|minutes|sec|second|seconds|hour|hours|hr)s?\b(?:\s*(?:to|that|about)\s+(.*))?", t)
+    if m:
+        n = int(m.group(1)); u = m.group(2)
+        mins = n / 60 if u.startswith("sec") else n * 60 if u.startswith("h") else n
+        msg = (m.group(3) or "").strip() or "Time's up!"
+        if not m.group(3):
+            m2 = re.search(r"remind me to (.+?) in \d+", t)
+            if m2: msg = m2.group(1)
+        return {"name": "timer", "args": {"minutes": mins, "message": msg}}
+    if re.search(r"\bbattery\b", t) and not re.search(r"setting", t): return {"name": "battery", "args": {}}
+    if re.search(r"^(what('s| is) the )?(time|date|day)( is it)?( today)?$|what time|what('s| is) (the )?(date|day)|today's date", t): return {"name": "time", "args": {}}
+    if re.fullmatch(r"lock( (the|my) )?( ?(pc|computer|laptop|screen))?", t): return {"name": "lock", "args": {}}
+    if re.fullmatch(r"(put (the |my )?(pc|computer|laptop) to sleep|sleep|go to sleep)", t): return {"name": "sleep", "args": {}}
+    if re.fullmatch(r"(restart|reboot)( (the|my) (pc|computer|laptop))?", t): return {"name": "restart", "args": {}}
+    if re.fullmatch(r"(shut ?down|turn off|power off)( (the|my) (pc|computer|laptop))?", t): return {"name": "shutdown", "args": {}}
+    m = re.match(r"(?:open|show|go to) (?:the |my )?(?:windows )?(.+?) settings?$", t) or re.match(r"(?:open )?settings? (?:for )?(.+)$", t)
+    if m and m.group(1).strip() in SETTINGS: return {"name": "settings", "args": {"page": m.group(1).strip()}}
+    m = re.search(r"\b(" + "|".join(sorted(map(re.escape, SETTINGS), key=len, reverse=True)) + r") settings?\b", t)
+    if m and re.search(r"\b(open|change|show|go|need|want|adjust|get)\b", t): return {"name": "settings", "args": {"page": m.group(1)}}
+    if re.fullmatch(r"open (windows )?settings", t): return {"name": "settings", "args": {"page": ""}}
+    m = re.match(r"(?:search (?:the web |google |online )?for|google|look up) (.+)$", t)
+    if m: return {"name": "web_search", "args": {"query": m.group(1)}}
+    m = re.match(r"(?:open|go to|visit|launch) (\S+\.(?:com|org|net|io|gov|edu|tv|co|ai|app|dev)\S*|https?://\S+)$", t)
+    if m: return {"name": "open_url", "args": {"url": m.group(1)}}
+    m = re.match(r"(?:open|show) (?:my |the )?(downloads|documents|pictures|desktop|music|videos)(?: folder)?$", t)
+    if m: return {"name": "open_folder", "args": {"folder": m.group(1)}}
+    m = re.match(r"(?:close|quit|exit|kill) (?:the )?(.+?)(?: app| window| program)?$", t)
+    if m: return {"name": "close_app", "args": {"app": m.group(1)}}
+    m = re.match(r"(?:open|launch|start|run|pull up|bring up|fire up|load up) (?:the |my )?(?:app )?(.+?)(?: app| program)?$", t)
+    if m: return {"name": "open_app", "args": {"app": m.group(1)}}
+    return None
+
+def parse_action(text):
+    m = re.search(r"ACTION:\s*(\{.*\})", text, re.S)
+    if not m:
+        t = text.strip()
+        m2 = re.match(r"(?:ACTION:\s*)?(\w+)\s*(\{.*\})?\s*$", t, re.S)  # e.g. brightness {"level": 50}
+        if m2 and m2.group(1) in ALL:
+            try: return {"name": m2.group(1), "args": json.loads(m2.group(2) or "{}")}
+            except Exception: return {"name": m2.group(1), "args": {}}
+        m3 = re.match(r"(?:ACTION:\s*)?(\{.*\})\s*$", t, re.S)  # e.g. {"settings": {"page": "bluetooth"}}
+        if m3:
+            try:
+                d = json.loads(m3.group(1))
+                if isinstance(d, dict) and d.get("name") in ALL:
+                    return {"name": d["name"], "args": d.get("args") if isinstance(d.get("args"), dict) else {}}
+                if isinstance(d, dict) and len(d) == 1:
+                    k, v = next(iter(d.items()))
+                    if k in ALL: return {"name": k, "args": v if isinstance(v, dict) else {}}
+            except Exception: pass
+        return None
+    s = m.group(1)
+    for cand in (s, s[:s.rfind("}") + 1], s.split("\n")[0]):
+        try:
+            d = json.loads(cand)
+            if isinstance(d, dict) and "name" in d:
+                d.setdefault("args", {}); return d if d["name"] in ALL else None
+        except Exception: pass
+    m = re.search(r'"name"\s*:\s*"(\w+)"', s)
+    if m and m.group(1) in ALL:
+        args = dict(re.findall(r'"(\w+)"\s*:\s*"([^"]*)"', s)); args.pop("name", None)
+        for k, v in re.findall(r'"(\w+)"\s*:\s*(-?\d+|true|false)', s): args[k] = json.loads(v)
+        return {"name": m.group(1), "args": args}
+    return None
+
+# ---------------- execution ----------------
+def describe(a):
+    n, g = a["name"], a.get("args", {})
+    return {"close_app": f"close {g.get('app', '?')}", "sleep": "put the PC to sleep", "restart": "restart the PC",
+            "shutdown": "shut down the PC"}.get(n, n)
+
+def execute(a, confirm=None, timer_cb=None):
+    """Run an allowlisted action. confirm(msg)->bool is required for CONFIRM actions. Returns a short result string."""
+    n, g = a["name"], a.get("args", {}) or {}
+    if n not in ALL: return f"I can't do '{n}'."
+    if n in CONFIRM:
+        if not confirm or not confirm(f"Do you want me to {describe(a)}?"): return f"Cancelled: {describe(a)}."
+    return ALL[n](g, timer_cb)
+
+def _open_app(g, _):
+    name = str(g.get("app", "")).strip()
+    a = find_app(name)
+    if not a: return f"I couldn't find an app called '{name}'."
+    if a[0] == "lnk": os.startfile(a[1])
+    else: subprocess.Popen(["explorer.exe", "shell:AppsFolder\\" + a[1]], creationflags=NOWIN)
+    return f"Opened {a[2]}."
+
+def _close_app(g, _):
+    name = str(g.get("app", "")).strip(); img = find_process(name)
+    if not img: return f"'{name}' doesn't seem to be running."
+    if img.lower() in ("explorer.exe", "csrss.exe", "winlogon.exe", "svchost.exe", "lsass.exe", "dwm.exe", "pythonw.exe", "python.exe"):
+        return f"I won't close {img}, it's needed by Windows or by me."
+    subprocess.run(["taskkill", "/IM", img, "/F"], capture_output=True, creationflags=NOWIN)
+    return f"Closed {img}."
+
+def _open_url(g, _):
+    u = str(g.get("url", "")).strip()
+    if not re.match(r"https?://", u): u = "https://" + u
+    webbrowser.open(u); return f"Opened {u}."
+
+def _search(g, _):
+    q = str(g.get("query", "")).strip()
+    webbrowser.open("https://www.bing.com/search?q=" + urllib.parse.quote_plus(q)); return f"Searched the web for '{q}'."
+
+def _folder(g, _):
+    p = folder_path(str(g.get("folder", "downloads")))
+    os.startfile(p); return f"Opened {p}."
+
+def _settings(g, _):
+    p = str(g.get("page", "")).lower().strip()
+    page = SETTINGS.get(p, p.replace(" ", "") if re.fullmatch(r"[a-z\- ]*", p) else "")
+    os.startfile("ms-settings:" + page); return f"Opened {p or 'Windows'} settings."
+
+def _volume(g, _):
+    lv = int(g.get("level", 50)); set_volume(lv, mute=False if lv > 0 else None); return f"Volume set to {max(0, min(100, lv))}%."
+def _vchange(g, _):
+    v, _m = get_volume(); lv = max(0, min(100, v + int(g.get("delta", 10)))); set_volume(lv, mute=False); return f"Volume set to {lv}%."
+def _mute(g, _): set_volume(mute=True); return "Sound muted."
+def _unmute(g, _): set_volume(mute=False); return "Sound unmuted."
+def _bright(g, _):
+    try: set_brightness(g.get("level", 50)); return f"Brightness set to {max(0, min(100, int(g.get('level', 50))))}%."
+    except Exception as e: return f"I couldn't change the brightness ({e})."
+def _bchange(g, _):
+    try: lv = max(0, min(100, get_brightness() + int(g.get("delta", 15)))); set_brightness(lv); return f"Brightness set to {lv}%."
+    except Exception as e: return f"I couldn't change the brightness ({e})."
+def _dark(g, _):
+    on = g.get("on", True); on = on if isinstance(on, bool) else str(on).lower() in ("true", "on", "1", "yes")
+    set_dark(on); return "Dark mode is on." if on else "Light mode is on."
+def _shot(g, _):
+    from PIL import ImageGrab
+    d = os.path.join(folder_path("pictures"), "Screenshots"); os.makedirs(d, exist_ok=True)
+    p = os.path.join(d, datetime.datetime.now().strftime("NpuStudio %Y-%m-%d %H-%M-%S.png"))
+    ImageGrab.grab(all_screens=True).save(p); return f"Screenshot saved to {p}."
+def _timer(g, cb):
+    try: mins = float(g.get("minutes", 5))
+    except Exception: mins = 5
+    msg = str(g.get("message", "")) or "Time's up!"
+    if cb: cb(mins * 60, msg)
+    nice = f"{int(mins*60)} seconds" if mins < 1 else f"{mins:g} minute" + ("s" if mins != 1 else "")
+    return f"Timer set for {nice}" + (f": {msg}" if msg != "Time's up!" else ".")
+def _battery(g, _): return battery()
+def _time(g, _):
+    n = datetime.datetime.now(); return n.strftime("It's %I:%M %p on %A, %B %d, %Y.").replace(" 0", " ")
+def _lock(g, _): ctypes.windll.user32.LockWorkStation(); return "Locked the PC."
+def _sleep(g, _): ctypes.windll.powrprof.SetSuspendState(0, 0, 0); return "Going to sleep."
+def _restart(g, _): subprocess.Popen(["shutdown", "/r", "/t", "5"], creationflags=NOWIN); return "Restarting in 5 seconds."
+def _shutdown(g, _): subprocess.Popen(["shutdown", "/s", "/t", "5"], creationflags=NOWIN); return "Shutting down in 5 seconds."
+
+ALL = {"open_app": _open_app, "close_app": _close_app, "open_url": _open_url, "web_search": _search, "open_folder": _folder,
+       "settings": _settings, "volume": _volume, "volume_change": _vchange, "mute": _mute, "unmute": _unmute,
+       "brightness": _bright, "brightness_change": _bchange, "dark_mode": _dark, "screenshot": _shot, "timer": _timer,
+       "battery": _battery, "time": _time, "lock": _lock, "sleep": _sleep, "restart": _restart, "shutdown": _shutdown}
