@@ -43,6 +43,8 @@ Each model keeps its own license — please check the model card before using ou
 | stable-diffusion-v1-5/stable-diffusion-inpainting | AI Change (redraw) | CreativeML OpenRAIL-M |
 | lllyasviel/control_v11p_sd15s2_lineart_anime | AI Change (ControlNet redraw guidance) | OpenRAIL |
 | Lykon/dreamshaper-8-inpainting | AI Change (redraw base model) | CreativeML OpenRAIL-M |
+| lllyasviel/control_v11p_sd15_openpose | AI Change (pose redraw guidance) | OpenRAIL |
+| lllyasviel/Annotators (OpenPose body/hand/face) via controlnet_aux | AI Change (pose detection) | CMU OpenPose weights: non-commercial use only |
 | timbrooks/instruct-pix2pix | AI Change (recolor) | MIT |
 | CIDAS/clipseg-rd64-refined | Auto-masks | Apache-2.0 |
 | mattmdjaga/segformer_b2_clothes | Clothing/body parsing | see model card |

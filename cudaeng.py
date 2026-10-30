@@ -149,3 +149,32 @@ def inpaint_cn(img, mask, control, prompt, negative, steps=30, guidance=8.0, cn_
         return p(prompt, image=img, mask_image=mask, control_image=control, negative_prompt=negative, num_inference_steps=steps,
                  guidance_scale=guidance, controlnet_conditioning_scale=cn_scale, strength=1.0, width=img.size[0], height=img.size[1],
                  generator=torch.Generator("cuda").manual_seed(int(seed)), callback_on_step_end=_cb(progress, steps)).images[0]
+
+POSE_REPO = "lllyasviel/control_v11p_sd15_openpose"
+def _pose_pipe(status=None):
+    import torch, diffusers
+    if _cur["name"] == "cnpose": return _cur["pipe"]
+    _cur["pipe"] = None; _cur["name"] = None; torch.cuda.empty_cache()
+    if status: status("Loading OpenPose + lineart ControlNet on NVIDIA (first time downloads ~0.7 GB more)...")
+    t = time.time(); cns = []
+    for repo in (CN_REPO, POSE_REPO):
+        try: cns.append(diffusers.ControlNetModel.from_pretrained(repo, torch_dtype=torch.float16, cache_dir=HF, variant="fp16"))
+        except Exception: cns.append(diffusers.ControlNetModel.from_pretrained(repo, torch_dtype=torch.float16, cache_dir=HF))
+    kw = dict(controlnet=cns, torch_dtype=torch.float16, cache_dir=HF, safety_checker=None, requires_safety_checker=False)
+    try: p = diffusers.StableDiffusionControlNetInpaintPipeline.from_pretrained(CN_BASE, variant="fp16", **kw)
+    except Exception: p = diffusers.StableDiffusionControlNetInpaintPipeline.from_pretrained(CN_BASE, **kw)
+    p = p.to("cuda"); p.set_progress_bar_config(disable=True)
+    _cur.update(name="cnpose", pipe=p); logging.info("cuda openpose+lineart inpaint loaded %.1fs", time.time() - t); return p
+
+def inpaint_pose(im, mask, lineart, pose, prompt, negative, steps=30, guidance=8.0, seed=1, progress=None, status=None, side=768):
+    """Whole image at long side 768; returns the result at the original size."""
+    import torch
+    with _lock:
+        p = _pose_pipe(status); W, H = im.size
+        src = _fit(im.convert("RGB"), side); sz = src.size
+        r = p(prompt, image=src, mask_image=mask.convert("RGB").resize(sz, Image.NEAREST),
+              control_image=[lineart.resize(sz, Image.BILINEAR), pose.resize(sz, Image.BILINEAR)],
+              controlnet_conditioning_scale=[0.75, 1.0], negative_prompt=negative, num_inference_steps=steps, guidance_scale=guidance,
+              strength=1.0, width=sz[0], height=sz[1], generator=torch.Generator("cuda").manual_seed(int(seed)),
+              callback_on_step_end=_cb(progress, steps)).images[0]
+        return r.resize((W, H), Image.LANCZOS)

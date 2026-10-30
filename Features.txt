@@ -157,6 +157,12 @@ CHIP MONITOR (window opened from the top bar)
   Same-shape swaps keep the original outline; shape changes use looser guidance. It draws 4 versions and keeps
   the one that really changed (and matches the colour you asked for). Recolor is only a clearly-labelled last resort.
   Body shape/proportions are never changed.
+* Pose changes (wave, arms crossed, hands on hips, arm raised): OpenPose finds her skeleton, the arm joints are moved
+  to the new pose and the arms are redrawn with OpenPose + lineart ControlNets together; each version is re-checked
+  against the target pose and any version with a hand on the chest/body is thrown away.
+* Hair changes cover the whole hair (long anime hair over the shoulders too); "short" hair also paints the old long
+  hair area back to background. Background swaps use the cut-out's soft edge, so no grey halo around the person.
+  Extra first-time download for poses: OpenPose ControlNet (~0.7 GB) + OpenPose detector (~0.5 GB).
 
 ------------------------------------------------------------
 NOTES / LIMITS
