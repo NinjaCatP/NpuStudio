@@ -257,7 +257,13 @@ def api_job(kind, a, j):
         im = cudaeng.gen(a["prompt"], w, h, int(a.get("steps", 4)), int(a.get("seed", 42)), prog, stat)
         upn = "Fast (Intel SR-1032)" if str(a.get("upscaler", "sharp")).lower() == "fast" else "Sharp (Real-ESRGAN x4plus)"
         if up > 1: stat(f"upscaling {up}x ({upn.split(' (')[0]})..."); im = upscaler(upn).upscale_to(im, up, prog)
-        im = imagegen.fit_crop(im, tw, th); return {"image": imgb64(im), "device": "NVIDIA", **save_out(im, "gen", stat, a.get("prompt", ""))}
+        im = imagegen.fit_crop(im, tw, th); fx = ""
+        if str(a.get("autofix", True)).lower() not in ("0", "false", "no", "off"):
+            try:
+                import facefix; stat("auto-fixing faces/eyes..."); im2, fx, ok = facefix.fix(im, "eyes", a.get("prompt", ""), progress=prog, status=stat, min_gain=0.0)
+                if ok: im = im2
+            except Exception: logging.exception("gen auto face fix"); fx = "face fix failed"
+        return {"image": imgb64(im), "device": "NVIDIA", "facefix": fx, **save_out(im, "gen", stat, a.get("prompt", ""))}
     if kind == "upscale":
         name = "Sharp (Real-ESRGAN x4plus)" if a.get("model", "sharp") == "sharp" else "Fast (Intel SR-1032)"
         src = b64img(a["image"]).convert("RGB"); sc = int(a.get("scale", 4))
@@ -294,7 +300,9 @@ def api_job(kind, a, j):
         mask = b64img(a["mask"]).convert("L").resize(im.size) if a.get("mask") else None
         if mask is None:
             try:
-                tgt = aichange.parse(instr); mask = aichange.Seg().mask(im, aichange.targets_for(tgt[0] if isinstance(tgt, tuple) else tgt, ana)) if tgt else None
+                import facefix
+                tgt = aichange.parse(instr)
+                mask = facefix.find_mask(im, tgt[0], instr, ana)[0] if (tgt[0] and not facefix.fix_what(instr)) else None
             except Exception: logging.exception("api auto-mask"); mask = None
         grow = max(-30, min(40, int(a.get("grow", 8))))
         if mask is not None and grow:
@@ -306,7 +314,8 @@ def api_job(kind, a, j):
             st_ = float(a.get("strength", 1.0)); stat("changing the masked area...")
             r = c.edit_masked(ai(), im, mask, instr, ana, strength=max(0.5, min(1.0, st_)), progress=prog, status=stat, method=method)
         else:
-            if not aichange.is_global(instr) and not a.get("whole"):
+            import facefix
+            if not facefix.fix_what(instr) and not aichange.is_global(instr) and not a.get("whole"):
                 raise ValueError("Couldn't find what to change. Name the thing (e.g. 'change outfit to a red dress'), paint it with the brush, "
                                  "or tick 'Whole picture' for a whole-picture change. Nothing was changed.")
             st_ = float(a.get("strength", 0.4)); r = c.edit_whole(im, instr, ana, strength=max(0.2, min(0.6, st_)), progress=prog, status=stat)

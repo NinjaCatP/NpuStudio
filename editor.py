@@ -440,14 +440,8 @@ def build_edit_tab(root, nb, send_to_upscale=None, dnd=None, upscale=None):
             def job():
                 try:
                     t = time.time(); r = None; how = ""
-                    try:
-                        import bodyparse
-                        if bodyparse.available(): r = bodyparse.mask(im, tgt)
-                    except Exception as e: logging.exception("bodyparse"); how = f" (body parser failed: {e})"
-                    if r is not None and r[1] > 0:
-                        m, pm, how = r; tg = [tgt]
-                    else:
-                        tg = aichange.targets_for(tgt, analysis); m, pm = segger().mask(im, tg); how = f"CLIPSeg on {segger().device}" + (" (body parser found nothing - drawing/anime?)" if r is not None else "") + how
+                    import facefix
+                    m, pm, how = facefix.find_mask(im, tgt, instr, analysis)
                     dt = time.time() - t; logging.info("find '%s' -> %s conf %.2f %.2fs", tgt, how, pm, dt)
                     def done():
                         cs.update(auto=m, auto_for=(id(im), instr), pmax=pm); draw()
@@ -465,11 +459,15 @@ def build_edit_tab(root, nb, send_to_upscale=None, dnd=None, upscale=None):
             if st["busy"]: wst.set("Busy - wait for the current AI job."); return
             mode, tgt, rep, kind, instr = cur_mode()
             if not instr: wst.set("Type what you want to change."); return
-            if mode == "auto" and cs.get("auto_for") != (id(st["img"]), instr): find(then=apply); return
+            try:
+                import facefix; _fix = facefix.fix_what(instr)
+            except Exception: _fix = None
+            if _fix: mode = "whole"   # "fix eyes"/"fix face": the detailer finds the faces itself
+            elif mode == "auto" and cs.get("auto_for") != (id(st["img"]), instr): find(then=apply); return
             im = st["img"]; analysis = ana.get("1.0", "end").strip()
             mask = st["mask"] if mode == "brush" else (auto_mask() if mode == "auto" else None)
             if mode == "auto" and (mask is None or not mask.getbbox()): wst.set("Target not found - paint it with the brush."); return
-            if mode == "whole" and not aichange.is_global(instr):
+            if mode == "whole" and not _fix and not aichange.is_global(instr):
                 wst.set("Couldn't tell what to change. Name the thing (e.g. 'change outfit to a red dress'), brush it, "
                         "or say 'whole image' for a whole-picture change. Nothing was changed."); return
             strength = float(strv.get()); job = cs["job"] = cs["job"] + 1

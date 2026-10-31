@@ -169,6 +169,13 @@ class Changer:
     def edit_whole(self, im, instr, analysis="", strength=0.4, seed=1, progress=None, status=None, upscaler=None):
         """Whole-image change. NVIDIA: InstructPix2Pix (takes the instruction directly, keeps faces).
         Otherwise LCM img2img with a rewritten scene prompt. Returns (img, devices, how, prompt_used)."""
+        try:
+            import facefix
+            _fw = facefix.fix_what(instr)
+        except Exception: _fw = None
+        if _fw:   # "fix eyes" / "fix face": ADetailer-style detail pass on every face (mask not needed)
+            r, how, ok = facefix.fix(im, _fw, analysis, progress=progress, status=status)
+            return r, ("NVIDIA",), how, f"(detailer: {_fw})"
         import devices
         if devices.plan("ip2p"):
             try:
@@ -193,6 +200,13 @@ class Changer:
           redraw  = new object / garment ("outfit to red dress", "replace X with Y") -> SD inpainting, strength 1.0,
                     style words from the analysis, negative prompt naming the old thing, bigger feathered mask with
                     face/hands/hair protected. Returns (img, devs, how, prompt)."""
+        try:
+            import facefix
+            _fw = facefix.fix_what(instr)
+        except Exception: _fw = None
+        if _fw:   # "fix eyes" / "fix face": ADetailer-style detail pass on every face (mask not needed)
+            r, how, ok = facefix.fix(im, _fw, analysis, progress=progress, status=status)
+            return r, ("NVIDIA",), how, f"(detailer: {_fw})"
         import devices
         tgt, rep, kind = parse(instr)
         if kind == "remove":

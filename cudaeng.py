@@ -141,14 +141,14 @@ def _cn_pipe(status=None):
     p = p.to("cuda"); p.set_progress_bar_config(disable=True)
     _cur.update(name="cn", pipe=p); logging.info("cuda controlnet inpaint loaded %.1fs", time.time() - t); return p
 
-def inpaint_cn(img, mask, control, prompt, negative, steps=30, guidance=8.0, cn_scale=0.8, seed=1, progress=None, status=None):
+def inpaint_cn(img, mask, control, prompt, negative, steps=30, guidance=8.0, cn_scale=0.8, seed=1, progress=None, status=None, strength=1.0):
     """img/mask/control are the same size (multiple of 8). Returns the generated image at that size."""
     import torch
     with _lock:
         p = _cn_pipe(status)
         return p(prompt, image=img, mask_image=mask, control_image=control, negative_prompt=negative, num_inference_steps=steps,
-                 guidance_scale=guidance, controlnet_conditioning_scale=cn_scale, strength=1.0, width=img.size[0], height=img.size[1],
-                 generator=torch.Generator("cuda").manual_seed(int(seed)), callback_on_step_end=_cb(progress, steps)).images[0]
+                 guidance_scale=guidance, controlnet_conditioning_scale=cn_scale, strength=float(strength), width=img.size[0], height=img.size[1],
+                 generator=torch.Generator("cuda").manual_seed(int(seed)), callback_on_step_end=_cb(progress, max(1, int(steps * float(strength))))).images[0]
 
 POSE_REPO = "lllyasviel/control_v11p_sd15_openpose"
 def _pose_pipe(status=None):

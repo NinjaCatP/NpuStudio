@@ -49,6 +49,7 @@
     <label class="grow">Upscale with<select id="genUp"><option value="sharp">Sharp</option><option value="fast">Fast</option></select></label>
     <label class="grow">Steps<input id="genSteps" type="number" min="1" max="50" value="4"></label>
   </div>
+  <label class="chk"><input type="checkbox" id="genFix" checked> Auto-fix faces (sharper, symmetrical eyes after drawing)</label>
   <div class="row"><label class="grow">Seed<input id="genSeed" type="number" value="42"></label><button id="genRand" class="ghost">🎲 Random</button></div>
   <p id="genPlan" class="muted small"></p>
   <button id="genGo" class="primary wide">Generate</button>
@@ -83,6 +84,7 @@
       <label>Strength <span id="stV">1.00</span><input type="range" id="editStr" min="0.2" max="1" step="0.05" value="1"></label>
       <label>Grow / shrink mask <span id="grV">+8</span> px<input type="range" id="editGrow" min="-30" max="40" step="1" value="8"></label>
       <p class="muted small">No brush = the target is found automatically from your words. Redraw = draw a new thing; Recolor = same thing, new colour.</p>
+      <div class="row"><button id="editFixEyes" class="grow ghost">👁 Fix eyes</button><button id="editFixFace" class="grow ghost">🙂 Fix face</button></div>
       <button id="editGo" class="primary wide">AI Change</button>
     </details>
     <div class="row"><button id="editSave" class="grow">💾 Save</button><button id="editShare" class="grow">📤 Share</button><button id="editToUp" class="grow">🔍 To Upscale</button></div>

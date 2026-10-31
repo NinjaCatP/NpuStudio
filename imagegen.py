@@ -157,6 +157,8 @@ def build_gen_tab(root, nb, send_to_upscale=None, get_upscaler=None, up_models=N
         ttk.Label(row, text="Upscale with").pack(side="left")
         ttk.Combobox(row, textvariable=upv, values=[m.split(" (")[0] for m in up_models], width=6, state="readonly").pack(side="left", padx=(2, 10))
         upv.set("Sharp")
+    fixv = tk.BooleanVar(value=True)
+    ttk.Checkbutton(row, text="Auto-fix faces", variable=fixv).pack(side="left", padx=(2, 10))
     gb = ttk.Button(row, text="Generate"); gb.pack(side="left", padx=4)
     sv = ttk.Button(row, text="Save", state="disabled"); sv.pack(side="left", padx=4)
     su = ttk.Button(row, text="Send to Upscale", state="disabled"); su.pack(side="left", padx=4)
@@ -229,12 +231,22 @@ def build_gen_tab(root, nb, send_to_upscale=None, get_upscaler=None, up_models=N
                 elif up > 1:
                     im = im.resize((w * up, h * up), Image.LANCZOS)
                 im = fit_crop(im, tw, th)
+                fxn = ""
+                if fixv.get() and not st["cancel"]:
+                    try:
+                        import facefix, cudaeng
+                        if cudaeng.available():
+                            ui(status.set, f"{pt}  -  auto-fixing faces/eyes...")
+                            im2, fxn, ok = facefix.fix(im, "eyes", prompt, status=lambda m: ui(status.set, f"{pt}  -  {m}"), min_gain=0.0)
+                            if ok: im = im2
+                            fxn = "; " + ("faces fixed" if ok else "face fix: " + fxn.replace("NOT DONE - ", "")[:80])
+                    except Exception: logging.exception("gen auto face fix"); fxn = "; face fix failed"
                 import outputs; outputs.autosave(im, "gen", prompt)
                 dt = time.time() - t; t_up = dt - t_draw
                 w, h = tw, th
                 st["img"] = im; logging.info("imagegen %s steps=%s seed=%s %.2fs %s", (w, h), steps, seed, dt, g.devs)
                 ui(lambda: (show(im), dev.set(devtxt(g)), sv.configure(state="normal"), su.configure(state="normal" if send_to_upscale else "disabled"), se.configure(state="normal" if send_to_edit else "disabled"),
-                            pb.configure(value=100), status.set(f"Done {w}x{h} in {dt:.1f}s (draw {t_draw:.1f}s, UNet on {g.devs[1]}" + (f"; upscale {t_up:.1f}s on {upd}" if up > 1 else "") + f"; seed {seed})")))
+                            pb.configure(value=100), status.set(f"Done {w}x{h} in {dt:.1f}s (draw {t_draw:.1f}s, UNet on {g.devs[1]}" + (f"; upscale {t_up:.1f}s on {upd}" if up > 1 else "") + f"; seed {seed}{fxn})")))
                 logging.info("imagegen final %sx%s draw %.1fs up %.1fs (%s on %s)", w, h, t_draw, t_up, upname, upd)
             except Exception as e:
                 logging.exception("imagegen"); ui(status.set, f"Error: {e}")

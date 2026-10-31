@@ -1,7 +1,7 @@
 // NpuStudio Companion web UI. Served by the desktop at /app; the Android shell (window.NpuShell) is optional.
 "use strict";
 const $ = id => document.getElementById(id);
-const UI_VERSION = "1.6.1";
+const UI_VERSION = "1.6.2";
 const Shell = window.NpuShell || null;
 const shellVersion = Shell && Shell.shellVersion ? Number(Shell.shellVersion()) : 0;
 
@@ -276,7 +276,7 @@ $("genGo").onclick = async () => {
   const p = $("genPrompt").value.trim(); if (!p) return $("genPrompt").focus();
   const [w, h] = genTarget();
   if (!(w >= 64 && h >= 64 && w <= 16384 && h <= 16384)) return notice("Size must be between 64 and 16384 on each side.");
-  const r = await runJob({ type: "gen", prompt: p, width: w, height: h, steps: +$("genSteps").value || 4, seed: +$("genSeed").value || 0, upscaler: $("genUp").value }, $("genJob"), "Image Gen",
+  const r = await runJob({ type: "gen", prompt: p, width: w, height: h, steps: +$("genSteps").value || 4, seed: +$("genSeed").value || 0, upscaler: $("genUp").value, autofix: $("genFix").checked }, $("genJob"), "Image Gen",
     { btn: $("genGo"), done: (r, s) => `Done in ${s} s · ${w}×${h}` });
   if (r) { showResult($("genOut"), r, "npustudio-gen", `· ${w}×${h}`); addSend($("genOut"), r.image); }
 };
@@ -373,6 +373,7 @@ $("editBg").onclick = () => editJob({ type: "remove_bg", image: curB64() }, "Rem
 $("editStr").oninput = () => $("stV").textContent = (+$("editStr").value).toFixed(2);
 $("editGrow").oninput = () => $("grV").textContent = (+$("editGrow").value > 0 ? "+" : "") + $("editGrow").value;
 $("editWhole").onchange = () => { $("editStr").value = $("editWhole").checked ? 0.4 : 1; $("editStr").oninput(); };
+["editFixEyes", "editFixFace"].forEach(id => $(id).onclick = () => { $("editInstr").value = id === "editFixEyes" ? "fix eyes" : "fix face"; $("editGo").click(); });
 $("editGo").onclick = () => {
   const instr = $("editInstr").value.trim(); if (!instr) return $("editInstr").focus();
   const m = $("editWhole").checked ? null : maskB64();
