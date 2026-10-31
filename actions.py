@@ -11,7 +11,27 @@ SETTINGS = {"wifi": "network-wifi", "wi-fi": "network-wifi", "network": "network
             "background": "personalization-background", "colors": "colors", "theme": "themes", "mouse": "mousetouchpad",
             "touchpad": "devices-touchpad", "keyboard": "typing", "privacy": "privacy", "storage": "storagesense",
             "date": "dateandtime", "time": "dateandtime", "language": "regionlanguage", "accounts": "yourinfo",
-            "printers": "printers", "night light": "nightlight", "about": "about", "vpn": "network-vpn"}
+            "printers": "printers", "night light": "nightlight", "about": "about", "vpn": "network-vpn",
+            "windows updates": "windowsupdate", "check for updates": "windowsupdate", "default apps": "defaultapps",
+            "wireless": "network-wifi", "internet": "network", "ethernet": "network-ethernet", "airplane mode": "network-airplanemode",
+            "hotspot": "network-mobilehotspot", "mobile hotspot": "network-mobilehotspot", "proxy": "network-proxy",
+            "monitor": "display", "resolution": "display", "speakers": "sound", "microphone": "privacy-microphone", "mic": "privacy-microphone",
+            "camera": "privacy-webcam", "webcam": "privacy-webcam", "location": "privacy-location", "apps and features": "appsfeatures",
+            "installed apps": "appsfeatures", "startup apps": "startupapps", "startup": "startupapps", "disk": "storagesense",
+            "power and battery": "powersleep", "power & battery": "powersleep", "sleep": "powersleep", "battery saver": "batterysaver",
+            "focus": "quiethours", "do not disturb": "quiethours", "lock screen": "lockscreen", "wallpaper": "personalization-background",
+            "taskbar": "taskbar", "start menu": "personalization-start", "fonts": "fonts", "region": "regionlanguage",
+            "devices": "devices", "printer": "printers", "gaming": "gaming-gamebar", "game mode": "gaming-gamemode",
+            "accessibility": "easeofaccess", "narrator": "easeofaccess-narrator", "sign-in options": "signinoptions",
+            "password": "signinoptions", "backup": "backup", "recovery": "recovery", "activation": "activation",
+            "troubleshoot": "troubleshoot", "security": "windowsdefender", "windows security": "windowsdefender",
+            "multitasking": "multitasking", "clipboard": "clipboard", "graphics": "display-advancedgraphics"}
+# Words that mean a Settings page even without the word "settings" ("open windows update", "open bluetooth").
+SETTINGS_BARE = {"windows update", "windows updates", "updates", "check for updates", "bluetooth", "wifi", "wi-fi", "wireless",
+                 "display settings", "default apps", "apps and features", "installed apps", "startup apps", "notifications",
+                 "privacy", "personalization", "storage", "power and battery", "power & battery", "battery saver", "night light",
+                 "airplane mode", "mobile hotspot", "hotspot", "proxy", "vpn", "lock screen", "taskbar", "sign-in options",
+                 "windows security", "accessibility", "multitasking", "about", "date and time", "network"}
 FOLDERS = {"downloads": "Downloads", "documents": "Documents", "pictures": "Pictures", "desktop": "Desktop",
            "music": "Music", "videos": "Videos"}
 
@@ -161,6 +181,15 @@ def route(text):
     t = re.sub(r"\s+(please|for me|now)$", "", t)
     r = _route_more(t)
     if r: return r
+    if re.fullmatch(r"(check|look|scan) for (windows )?updates", t): return {"name": "settings", "args": {"page": "windows update"}}
+    m = re.match(r"(?:open|show|go to|bring up|pull up|launch|start) (?:the |my )?(.+?)$", t)
+    if m:
+        x = m.group(1).strip()
+        if x in ("windows settings", "settings", "the settings", "settings app", "pc settings", "control settings"): return {"name": "settings", "args": {"page": ""}}
+        y = re.sub(r"^(windows |pc )", "", x) if x not in SETTINGS else x
+        if x in SETTINGS_BARE or y in SETTINGS_BARE:
+            k = x if x in SETTINGS else y if y in SETTINGS else "date" if "date" in x else "display"
+            return {"name": "settings", "args": {"page": k}}
     m = re.search(r"(?:volume|sound)\s*(?:to|at|=)?\s*" + NUM, t) or re.search(r"set (?:the )?(?:volume|sound)(?: level)? to " + NUM, t)
     if m: return {"name": "volume", "args": {"level": int(m.group(1))}}
     if re.search(r"\b(turn|volume|sound)\b.*\b(up|louder)\b|\blouder\b", t): return {"name": "volume_change", "args": {"delta": 10}}
@@ -223,7 +252,11 @@ def _route_more(t):
     if m: return {"name": "clipboard_set", "args": {"text": m.group(1).strip("\"' ")}}
     if re.search(r"\b(system info|system information|pc specs|computer specs|specs of (this|my) (pc|computer|laptop)|how much (ram|memory)|(cpu|gpu|ram) (usage|info)|uptime|disk space|free space)\b", t):
         return {"name": "system_info", "args": {}}
-    if re.search(r"\b(what('s| is| are)? (apps |programs )?(are )?(running|open)|running (apps|programs)|open (apps|windows|programs)|list (the )?(running |open )?(apps|programs|windows))\b", t):
+    if re.fullmatch(r"(what|which) (apps|programs|windows|applications)( do i have| have i got)? (are |is )?(open|running)( right| (right )?now| on (my|the|this) (pc|computer|laptop))?"
+                    r"|what('s| is) (open|running)( right| (right )?now| on (my|the|this) (pc|computer|laptop))?"
+                    r"|(list|show( me)?|tell me)( (all|the|my))? (open|running) (apps|programs|windows|applications)"
+                    r"|(list|show( me)?)( (all|the|my))? (apps|programs|windows|applications) (that are )?(open|running)"
+                    r"|(open|running) (apps|programs|applications)\??", t):
         return {"name": "running_apps", "args": {}}
     return None
 
