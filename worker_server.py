@@ -4,7 +4,7 @@ and every request needs the pairing key from models/remote_server.json. Start wi
 import sys as _s, os as _o
 for _n in ("stdout", "stderr"):
     if getattr(_s, _n) is None: setattr(_s, _n, open(_o.devnull, "w", encoding="utf-8"))
-import os, sys, json, time, uuid, secrets, socket, logging, threading, ipaddress, traceback, inspect
+import os, urllib.request, sys, json, time, uuid, secrets, socket, logging, threading, ipaddress, traceback, inspect
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 os.environ["NPU_SERVER"] = "1"
 APP = os.path.dirname(os.path.abspath(__file__)); MD = os.path.join(APP, "models"); sys.path.insert(0, APP)
@@ -314,7 +314,26 @@ def api_job(kind, a, j):
             j["confirm"] = q; j["state"] = "confirm"; ev = j["ev"] = threading.Event()
             ok = ev.wait(120); j["state"] = "running"; j["confirm"] = None
             return bool(ok and j.get("answer"))
-        target = "phone" if str(a.get("device", "pc")).lower() == "phone" else "pc"
+        dv = str(a.get("device", "pc")).lower()
+        import actions
+        if dv == "laptop" or dv.startswith("phone:"):     # another device in the mesh: understand here, run there
+            if dv == "laptop":
+                def runner(x):
+                    if x["name"] in actions.CONFIRM and not confirm(f"Do you want me to {actions.describe(x)} on the laptop?"): return f"Cancelled: {actions.describe(x)}."
+                    try: return laptop_action(x)
+                    except Exception as e: return f"Couldn't reach the laptop: {e}"
+                src, act, res, n, dt = eng.handle(a["message"], on_text, confirm=confirm, target="pc", runner=runner)
+            else:
+                pid = dv[6:]
+                def runner(x):
+                    if x["name"] in ("save_image", "share_image", "time"): return "That only works on the phone you're chatting from."
+                    if x["name"] in actions.PHONE_CONFIRM and not confirm(f"Do you want me to {actions.describe_phone(x)} on {(_phones.get(pid) or {}).get('name', 'the phone')}?"):
+                        return f"Cancelled: {actions.describe_phone(x)}."
+                    st_ = phone_status(pid); _, r = phone_queue(x["name"], x.get("args"), pid, wait=20 if st_["connected"] else 0)
+                    return r or ("Sent to the phone." if st_["connected"] else "The phone is offline; it will run this when it reconnects.")
+                src, act, res, n, dt = eng.handle(a["message"], on_text, confirm=confirm, target="phone", runner=runner)
+            return {"text": j.get("text", ""), "action": str(act) if act else None, "action_result": res, "target": dv, "device": eng.device}
+        target = "phone" if dv == "phone" else "pc"
         src, act, res, n, dt = eng.handle(a["message"], on_text, confirm=confirm, target=target)
         if target == "phone":   # never run on this PC: hand the allowlisted action back to the phone app
             import actions
@@ -334,14 +353,77 @@ def monitor():
     except Exception as e: d["chips"] = {}; d["chips_error"] = str(e)
     return d
 
+# ---- device mesh: phones (Companion v2.1 background link long-polls), the laptop (reports every 3 s), this desktop ----
+_phones = {}            # id -> {"name", "seen", "via", "q": [cmd], "res": {cid: text}}
+_pcv = threading.Condition()
+def _ph(pid, name=None):
+    p = _phones.setdefault(pid, {"name": name or "Phone", "seen": 0.0, "via": None, "q": []})
+    if name: p["name"] = name
+    return p
+def phone_status(pid=None):
+    ps = [p for k, p in _phones.items() if pid in (None, k)]
+    p = max(ps, key=lambda x: x["seen"]) if ps else None
+    ago = time.time() - p["seen"] if p and p["seen"] else None
+    return {"connected": ago is not None and ago < 75, "last_seen_s": round(ago, 1) if ago is not None else None,
+            "via": p and p["via"], "pending": len(p["q"]) if p else 0, "phones": len(_phones)}
+def phone_poll(h, q):
+    wait = max(0, min(30, int((q.get("wait") or ["25"])[0] or 25)))
+    pid = (q.get("id") or ["phone"])[0][:64]; name = (q.get("name") or [None])[0]
+    end = time.time() + wait
+    with _pcv:
+        p = _ph(pid, name and name[:40]); p["via"] = "remote" if h.client_address[0].startswith("100.") else "home"
+        while True:
+            p["seen"] = time.time()
+            if p["q"] or time.time() >= end: break
+            _pcv.wait(min(5, end - time.time()))
+        cmds, p["q"] = p["q"], []
+    p["seen"] = time.time()
+    return h._send(200, {"commands": cmds})
+_phone_res = {}
+def phone_queue(name, args=None, pid=None, wait=0):
+    """Queue an allowlisted command for one phone (pid) or all phones; optionally wait for its result text."""
+    cid = uuid.uuid4().hex[:12]; cmd = {"cid": cid, "name": name, "args": args or {}, "t": time.time()}
+    with _pcv:
+        if not _phones: _ph("phone")
+        for k, p in _phones.items():
+            if pid in (None, k): p["q"] = [c for c in p["q"] if not (name in ("find_phone", "stop_sound") and c["name"] == name)] + [cmd]
+        _pcv.notify_all()
+        end = time.time() + wait
+        while wait and cid not in _phone_res and time.time() < end: _pcv.wait(min(2, end - time.time()))
+    return cid, _phone_res.pop(cid, None)
+def devices():
+    """Everything the chat 'Control' picker can target."""
+    out = [{"id": "desktop", "name": socket.gethostname() + " (desktop)", "kind": "pc", "online": True}]
+    try:
+        lp = json.load(open(os.path.join(MD, "laptop.json")))
+        rep = REPORTS.get(lp.get("name", ""), {}); ago = time.time() - rep.get("_t", 0)
+        out.append({"id": "laptop", "name": lp.get("name") or "Laptop", "kind": "pc", "online": ago < 15 and bool(rep.get("serve")), "last_seen_s": round(ago, 1) if rep else None})
+    except Exception: pass
+    for k, p in sorted(_phones.items()):
+        if k == "phone" and len(_phones) > 1 and not p["seen"]: continue
+        ago = time.time() - p["seen"] if p["seen"] else None
+        out.append({"id": "phone:" + k, "name": p["name"], "kind": "phone", "online": ago is not None and ago < 75, "last_seen_s": round(ago, 1) if ago is not None else None})
+    return out
+def laptop_action(a):
+    """Run an (already confirmed) PC action on the laptop's share server."""
+    import remote; c = remote.cfg()
+    if not c.get("host"): raise RuntimeError("the laptop isn't linked")
+    r = urllib.request.Request(f"http://{c['host']}:{c.get('port', 47860)}/api/v1/action", data=json.dumps({"action": a, "confirmed": True}).encode(),
+                               headers={"X-Key": c["key"], "Content-Type": "application/json"}, method="POST")
+    return json.load(urllib.request.urlopen(r, timeout=30)).get("result", "")
+
 def api_get(h, p):
     if p == ["health"]: return h._send(200, gpu_info())
+    if p == ["phone", "poll"]:
+        import urllib.parse; return phone_poll(h, urllib.parse.parse_qs(h.path.partition("?")[2]))
+    if p == ["phone", "status"]: return h._send(200, phone_status())
+    if p == ["devices"]: return h._send(200, {"devices": devices()})
     if p == ["info"]:
         c = config(); v = {}
         try: v = json.load(open(os.path.join(WEB, "version.json")))
         except Exception: pass
         return h._send(200, {"name": socket.gethostname(), "port": c["port"], "lan": lan_ip(), "tailscale": tailscale_ips(),
-                             "ui": v, "busy": _busy[0], "jobs": [{"id": k, "type": x.get("type"), "state": x["state"]} for k, x in JOBS.items() if x.get("type")]})
+                             "ui": v, "busy": _busy[0], "phone": phone_status(), "jobs": [{"id": k, "type": x.get("type"), "state": x["state"]} for k, x in JOBS.items() if x.get("type")]})
     if p == ["monitor"]: return h._send(200, monitor())
     if p == ["options"]:     # what the phone UI should offer (mirrors the laptop app)
         import npustudio, imagegen
@@ -363,6 +445,23 @@ def api_get(h, p):
 def api_post(h, p, data):
     try: a = json.loads(data or b"{}")
     except Exception: return h._send(400, {"error": "body must be JSON"})
+    if p == ["phone", "command"]:
+        import phonelink
+        if a.get("name") not in phonelink.CMDS: return h._send(400, {"error": "allowed: " + ", ".join(sorted(phonelink.CMDS))})
+        pid = str(a["device"])[6:] if str(a.get("device", "")).startswith("phone:") else None
+        phone_queue(a["name"], {}, pid); logging.info("phone command queued: %s", a["name"])
+        return h._send(200, {"queued": a["name"], "status": phone_status(pid)})
+    if p == ["phone", "result"]:          # the phone's background service reports what a queued command did
+        with _pcv: _phone_res[str(a.get("cid"))] = str(a.get("text", ""))[:2000]; _pcv.notify_all()
+        return h._send(200, {"ok": True})
+    if p == ["action"]:                   # another PC asks THIS PC to run an allowlisted action (confirm was asked on the chatting device)
+        import actions
+        act = a.get("action") or {}
+        if act.get("name") not in actions.ALL: return h._send(400, {"error": "not an allowed action"})
+        ok = bool(a.get("confirmed"))
+        try: res = actions.execute({"name": act["name"], "args": act.get("args") or {}}, confirm=lambda m: ok)
+        except Exception as e: logging.exception("remote action"); return h._send(500, {"error": str(e)})
+        logging.info("remote action %s -> %s", act["name"], res); return h._send(200, {"result": res})
     if p == ["chat", "new"]:
         if _chat["eng"]: _chat["eng"].new_chat()
         return h._send(200, {"ok": True})

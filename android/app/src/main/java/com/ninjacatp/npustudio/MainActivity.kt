@@ -72,6 +72,20 @@ class MainActivity : AppCompatActivity() {
             ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
         pairing = HostRules.load(this)
         if (pairing == null) pairLauncher.launch(Intent(this, PairActivity::class.java)) else load()
+        LinkService.start(this); if (intent?.action == "npu.found") LinkService.start(this, LinkService.ACT_STOP)
+        askBatteryOnce()
+    }
+    override fun onNewIntent(i: Intent) { super.onNewIntent(i); if (i.action == "npu.found") LinkService.start(this, LinkService.ACT_STOP) }
+    /** Explains once, then asks Android to exempt us from battery optimization so Find my phone keeps working. */
+    private fun askBatteryOnce() {
+        val sp = getSharedPreferences("npu", MODE_PRIVATE)
+        val pm = getSystemService(android.os.PowerManager::class.java)
+        if (sp.getBoolean("asked_battery", false) || !LinkService.enabled(this) || pm.isIgnoringBatteryOptimizations(packageName)) return
+        sp.edit().putBoolean("asked_battery", true).apply()
+        android.app.AlertDialog.Builder(this).setTitle("Find my phone")
+            .setMessage("NpuStudio keeps a small background connection to your PC so 'Find my phone' can ring this phone. It checks in about twice a minute and uses very little battery. Allow it to run in the background on the next screen? You can turn it off in NpuStudio's Settings tab.")
+            .setPositiveButton("Continue") { _, _ -> try { startActivity(Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, android.net.Uri.parse("package:$packageName"))) } catch (e: Exception) {} }
+            .setNegativeButton("Not now", null).show()
     }
 
     @Volatile private var choosing = false
@@ -152,6 +166,9 @@ class MainActivity : AppCompatActivity() {
             runOnUiThread { startActivity(Intent.createChooser(i, "Share picture")) }
         } }
         @JavascriptInterface fun notify(title: String, text: String) = notifyUser(title, text)
+        /** v3: background link (Find my phone) on/off, and when it last reached the desktop (ms epoch, 0 = never). */
+        @JavascriptInterface fun getBackground(): String = org.json.JSONObject().put("on", LinkService.enabled(this@MainActivity)).put("last_ok", LinkService.lastOk).put("id", LinkService.deviceId(this@MainActivity)).put("name", LinkService.deviceName()).toString()
+        @JavascriptInterface fun setBackground(on: Boolean) = runOnUiThread { LinkService.setEnabled(this@MainActivity, on) }
         /** v2: allowlisted phone action from the chat; result text comes back via npuCallback. */
         @JavascriptInterface fun phoneAction(json: String, cbId: String) {
             val id = cbId.filter { it.isLetterOrDigit() }

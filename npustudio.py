@@ -357,15 +357,17 @@ class ChatEngine:
         self.target = getattr(self, "want_target", "pc"); self._rnew = True
         self.pipe.start_chat(actions.PHONE_PROMPT if self.target == "phone" else actions.TOOLS_PROMPT)
 
-    def handle(self, q, on_text, confirm=None, timer_cb=None, on_action=None, target="pc"):
+    def handle(self, q, on_text, confirm=None, timer_cb=None, on_action=None, target="pc", runner=None):
         """Router first, then the model. Returns (source, action, result, tokens, seconds).
         target="phone": actions are NOT run here; the result is ("phone", action) for the phone app to run."""
         import actions
         phone = target == "phone"
         if getattr(self, "target", "pc") != target:   # switch the system prompt (new conversation for the other device)
             self.want_target = target; self.new_chat()
-        run = (lambda a: ("phone", a)) if phone else (lambda a: actions.execute(a, confirm, timer_cb))
+        run = runner or ((lambda a: ("phone", a)) if phone else (lambda a: actions.execute(a, confirm, timer_cb)))
         a = actions.route_phone(q) if phone else actions.route(q)
+        if a and a["name"] == "_cant":       # phone can't do this kind of thing: say so, never substitute another action
+            on_text(a["args"]["text"]); return "router", None, None, 0, 0.0
         if a:
             if on_action: on_action(a)
             return "router", a, run(a), 0, 0.0
@@ -384,6 +386,8 @@ class ChatEngine:
         n, dt = self.ask(q, tok)
         full = "".join(buf)
         a = actions.parse_action(full, actions.PHONE if phone else None)
+        if a and phone and not actions.phone_guard(q, a):     # e.g. the model answered "volume" for a brightness request
+            logging.info("phone guard rejected %s for %r", a, q); on_text(actions.CANT); return "model", None, None, n, dt
         if a and state["mode"] != "text":  # only act when the reply *is* an action, not an answer that rambles into one
             if on_action: on_action(a)
             return "model", a, run(a), n, dt
@@ -513,8 +517,35 @@ def build_chat_tab(root, nb, demo=None):
     txt.tag_configure("ai", foreground="#107c10", font=("Segoe UI", 11, "bold"))
     txt.pack(fill="both", expand=True, padx=6)
     bot = ttk.Frame(f); bot.pack(fill="x", padx=6, pady=6)
+    # Control picker: This PC, the other PC, phones (from the desktop server's device list); offline ones are marked
+    ttk.Label(bot, text="Control").pack(side="left")
+    tgt = tk.StringVar(value="This PC"); tmap = {"This PC": None}
+    tbox = ttk.Combobox(bot, textvariable=tgt, state="readonly", width=26, values=["This PC"]); tbox.pack(side="left", padx=(4, 8))
+    hintv = tk.StringVar()
+    HINT_PC = "Things I can do: open apps or websites, volume, brightness, dark mode, night light, Windows settings (Wi-Fi, Bluetooth, battery saver...), screenshots, timers, battery, time, lock, recent files, find my phone. Closing apps, emptying the Recycle Bin, sleep, restart and shut down ask you first."
+    HINT_PH = "Sent to the phone's background link: volume, brightness, Do Not Disturb, ring/vibrate/silent, flashlight, media, alarms/timers, battery/storage/network, notes, read aloud, open apps or links, find my phone. Calls and texts ask you here first and are only prefilled on the phone."
+    def thint(_=None):
+        d = tmap.get(tgt.get()); hintv.set(HINT_PH if d and d.startswith("phone:") else (HINT_PC if not d else HINT_PC.replace("Things I can do:", f"Runs on {tgt.get().split(' (')[0]}:")))
+    tbox.bind("<<ComboboxSelected>>", thint); thint()
+    def load_targets():
+        def w():
+            try:
+                import phonelink, remote; devs = phonelink.devices(); me = "laptop" if remote.role() == "laptop" else "desktop"
+                m = {"This PC": None}
+                for d in devs:
+                    if d["id"] == me: continue
+                    lab = ("\U0001f4f1 " if d["kind"] == "phone" else "\U0001f5a5 ") + ("Desktop PC" if d["id"] == "desktop" else d["name"]) + ("" if d["online"] else " (offline)")
+                    m[lab] = "pc" if d["id"] == "desktop" else d["id"]
+                def apply():
+                    tmap.clear(); tmap.update(m); tbox.configure(values=list(m))
+                    if tgt.get() not in m: tgt.set("This PC")
+                    thint()
+                ui(apply)
+            except Exception as e: logging.debug("targets: %s", e)
+        threading.Thread(target=w, daemon=True).start(); root.after(20000, load_targets)
+    root.after(1500, load_targets)
     ent = ttk.Entry(bot, font=("Segoe UI", 11)); ent.pack(side="left", fill="x", expand=True)
-    ttk.Label(f, text="Things I can do: open apps or websites, volume, brightness, dark mode, Windows settings, screenshots, timers, battery, time, lock. Closing apps, sleep, restart and shut down ask you first.", foreground="#666", wraplength=1500, justify="left").pack(anchor="w", padx=6, before=bot)
+    ttk.Label(f, textvariable=hintv, foreground="#666", wraplength=1500, justify="left").pack(anchor="w", padx=6, before=bot)
     ttk.Label(f, textvariable=status).pack(anchor="w", padx=6, pady=(0, 4))
     txt.tag_configure("act", foreground="#8a4b00", font=("Segoe UI", 11, "bold"))
     from tkinter import messagebox
@@ -535,7 +566,17 @@ def build_chat_tab(root, nb, demo=None):
         if not q or not st["eng"] or st["busy"]: return
         ent.delete(0, "end"); st["busy"] = True; import busy; busy.mark("Chat", True)
         put("You: ", "you"); put(q + "\n\n"); put("AI: ", "ai"); status.set("Thinking...")
+        dest = tmap.get(tgt.get()); lab = tgt.get()
         def work():
+            if dest:
+                try:
+                    if lab.endswith("(offline)") and not dest.startswith("phone:"): raise RuntimeError(lab + " is offline")
+                    import phonelink; r = phonelink.remote_chat(q, dest, confirm, lambda s: ui(put, s))
+                    if r.get("text") and not r.get("_shown"): ui(put, r["text"])
+                    if r.get("action"): ui(put, f"\n\u2714 [{lab}] " + str(r.get("action_result") or r["action"]), "act")
+                    ui(status.set, f"Handled by the desktop server for {lab}.")
+                except Exception as e: logging.exception("remote chat"); ui(status.set, f"Error: {e}")
+                ui(put, "\n\n"); st["busy"] = False; import busy; busy.mark("Chat", False); return
             try:
                 src, a, res, n, dt = st["eng"].handle(q, lambda s: ui(put, s), confirm, timer_cb)
                 if a is not None: ui(put, "\u2714 " + res, "act")
@@ -891,6 +932,21 @@ def gui():
     om_.add_command(label="Change output folder...", command=pick_outputs)
     om_.add_command(label="Reset to default (NpuStudio\\outputs)", command=lambda: outputs.set_folder(""))
     outm.pack(side="right", padx=4)
+    import phonelink
+    phv = tk.StringVar(value="Phone: ?")
+    def find_phone():
+        phv.set("Phone: ringing..."); threading.Thread(target=lambda: (lambda r: root.after(0, lambda: messagebox.showinfo("Find my phone", r, parent=root)))(phonelink.find_phone()), daemon=True).start()
+    def phone_poll():
+        def w():
+            try:
+                s = phonelink.status(); a = s.get("last_seen_s")
+                t = "Phone: connected" + (" (Tailscale)" if s.get("via") == "remote" else "") if s.get("connected") else ("Phone: last seen " + (f"{int(a // 60)} min ago" if a and a >= 60 else f"{int(a or 0)} s ago") if a is not None else "Phone: not connected")
+            except Exception: t = "Phone: server offline"
+            root.after(0, lambda: phv.set(t))
+        threading.Thread(target=w, daemon=True).start(); root.after(20000, phone_poll)
+    ttk.Button(topbar, text="\U0001F4F1 Find my phone", command=find_phone).pack(side="right", padx=4)
+    ttk.Label(topbar, textvariable=phv, foreground="#666").pack(side="right", padx=4)
+    root.after(3000, phone_poll)
     if "--autorestart" in sys.argv: root.after(6000, lambda: do_restart(force=True))
     ttk.Button(topbar, text="Pair phone", command=lambda: open_pair_window(root)).pack(side="right", padx=4)
     import devices

@@ -1,7 +1,7 @@
 // NpuStudio Companion web UI. Served by the desktop at /app; the Android shell (window.NpuShell) is optional.
 "use strict";
 const $ = id => document.getElementById(id);
-const UI_VERSION = "1.4.0";
+const UI_VERSION = "1.6.0";
 const Shell = window.NpuShell || null;
 const shellVersion = Shell && Shell.shellVersion ? Number(Shell.shellVersion()) : 0;
 
@@ -173,13 +173,13 @@ async function chatSend() {
   bot.classList.remove("thinking");
   box.remove(); $("chatSend").disabled = false;
   if (!r) { if (bot.textContent === "Thinking…") bot.textContent = "(no reply)"; return; }
-  bot.textContent = r.text || bot.textContent;
+  bot.textContent = r.text || (bot.textContent === "Thinking…" ? "" : bot.textContent);
   if (r.phone_action) {
     const pa = r.phone_action, a = document.createElement("div"); a.className = "act"; bot.appendChild(a);
     a.textContent = "📱 " + pa.name + " …";
     if (r.needs_confirm && !(await ask(`Do you want me to ${r.confirm_text || pa.name}?`))) a.textContent = "📱 Cancelled: " + (r.confirm_text || pa.name);
     else a.textContent = "📱 " + pa.name + " → " + await phoneAction(pa);
-  } else if (r.target === "phone" && !r.text) bot.textContent = "(no reply)";
+  } else if (!r.text && !r.action && bot.textContent === "") bot.textContent = "(no reply)";
   if (r.action) { const a = document.createElement("div"); a.className = "act"; a.textContent = `⚙ ${r.action}${r.action_result ? " → " + r.action_result : ""}`; bot.appendChild(a); }
   bot.scrollIntoView({ block: "end" });
 }
@@ -191,6 +191,12 @@ async function phoneAction(pa) {
     (pa.name === "save_image" ? saveImg : shareImg)(window.LAST.b64, window.LAST.name); return pa.name === "save_image" ? "Saving the last picture." : "Sharing the last picture.";
   }
   if (pa.name === "time") return new Date().toLocaleString();
+  const V3 = ["brightness", "brightness_change", "brightness_auto", "dnd", "ring_mode", "rotation_lock", "settings_panel", "keep_screen_on", "camera", "navigate",
+    "maps_search", "call", "sms", "calendar_event", "media", "storage", "network", "note", "notes", "speak", "app_settings", "find_phone", "stop_sound"];
+  if (Shell && V3.includes(pa.name) && shellVersion < 3) {
+    if (pa.name === "navigate" || pa.name === "maps_search") { location.href = "geo:0,0?q=" + encodeURIComponent(g.place || g.query || ""); return "Opened maps."; }
+    return `Update the app to use ${pa.name.replace(/_/g, " ")} (Companion v2.1). See the update banner at the top.`;
+  }
   if (!(Shell && typeof Shell.phoneAction === "function")) {
     if (pa.name === "open_url") { window.open(/^https?:/.test(g.url) ? g.url : "https://" + g.url); return "Opened."; }
     if (pa.name === "web_search") { window.open("https://www.bing.com/search?q=" + encodeURIComponent(g.query || "")); return "Searched."; }
@@ -199,19 +205,35 @@ async function phoneAction(pa) {
   }
   return new Promise(res => { const id = "c" + (++cbSeq); cbs[id] = d => res(d || "Done."); Shell.phoneAction(JSON.stringify(pa), id); setTimeout(() => res("No answer from the phone app."), 15000); });
 }
+const HINTS = {
+  phone: "Commands run on this phone: apps, flashlight, volume (media/ring/alarm/notification/call), brightness and auto-brightness, Do Not Disturb, ring/vibrate/silent, rotation lock, keep screen on, Wi-Fi/Bluetooth/data/NFC/location panels, camera, navigate/maps, call or text (you tap send), calendar events, play/pause/next, alarms/timers, battery/storage/network, notes, read aloud, app settings, find my phone, links, clipboard, save/share the last picture.",
+  remotephone: "Commands are sent to that phone's background link: volume, brightness, Do Not Disturb, ring modes, flashlight, media, alarms/timers, battery/storage/network, notes, read aloud, find my phone, open apps or links. Calls/texts are prefilled there and ask here first.",
+  pc: "Commands run on that PC: apps, volume, brightness, media, screenshot, lock, files, recent files, clipboard, system info, Wi-Fi/Bluetooth/battery saver/night light settings, empty the Recycle Bin, find my phone. Risky ones ask you here first."
+};
 (function chatSetup() {
-  const t = localStorage.getItem("npuTarget") || (Shell ? "phone" : "pc"); $("chatTarget").value = t;
-  const hint = () => { $("chatHint").textContent = $("chatTarget").value === "phone"
-    ? "Commands run on this phone: open apps, flashlight, volume, alarms/timers, links, battery, clipboard, save/share the last picture."
-    : "Commands run on the desktop PC: apps, volume, media, screenshot, lock, files, clipboard, system info. Risky ones ask first."; };
-  $("chatTarget").onchange = () => { localStorage.setItem("npuTarget", $("chatTarget").value); hint(); }; hint();
+  const sel = $("chatTarget");
+  let me = null; try { me = Shell && Shell.getBackground ? JSON.parse(Shell.getBackground()).id : null; } catch (e) {}
+  const hint = () => { const v = sel.value; $("chatHint").textContent = v === "phone" ? HINTS.phone : v.startsWith("phone:") ? HINTS.remotephone : HINTS.pc; };
+  const fill = devs => {
+    const want = localStorage.getItem("npuTarget") || (Shell ? "phone" : "pc"); sel.innerHTML = "";
+    const add = (v, label, on, kind) => { const o = document.createElement("option"); o.value = v; o.textContent = (kind === "phone" ? "📱 " : "🖥 ") + label + (on ? "" : " (offline)"); o.disabled = !on; o.style.color = on ? "" : "#999"; sel.appendChild(o); };
+    if (Shell) add("phone", "This phone", true, "phone");
+    for (const d of devs) {
+      if (d.id === "phone:" + me) continue;
+      add(d.id === "desktop" ? "pc" : d.id, d.id === "desktop" ? "Desktop PC" : d.name, d.online, d.kind);
+    }
+    const ok = [...sel.options].find(o => o.value === want && !o.disabled); sel.value = ok ? want : sel.options[0].value; hint();
+  };
+  const load = async () => { try { const r = await api("devices"); if (r && r.devices) fill(r.devices); } catch (e) {} };
+  fill([{ id: "desktop", name: "Desktop PC", kind: "pc", online: true }]); load(); setInterval(load, 20000);
+  sel.onchange = () => { localStorage.setItem("npuTarget", sel.value); hint(); };
 })();
 async function shellUpdateCheck() {
   try {
     const v = await (await fetch("version.json", { cache: "no-store" })).json();
     if (Shell && shellVersion < (v.latest_shell || v.min_shell || 1)) {
       const u = location.origin + "/app/NpuStudio-Companion.apk";
-      $("shellUpd").innerHTML = `📲 An Android app update (v${v.latest_shell}) adds phone control and home/remote switching. Install <b>NpuStudio-Companion.apk</b> over this one: open <a href="${u}" target="_blank">${u}</a> in Chrome on this phone, or copy it from H:\\downloads on the desktop. Your pairing is kept.`;
+      $("shellUpd").innerHTML = `📲 An Android app update (v${v.latest_shell === 3 ? "2.1" : v.latest_shell}) adds brightness, Do Not Disturb, ring modes, calls/texts, maps, notes, read aloud and Find my phone. Install <b>NpuStudio-Companion.apk</b> over this one: open <a href="${u}" target="_blank">${u}</a> in Chrome on this phone, or copy it from H:\\downloads on the desktop. Your pairing is kept.`;
       $("shellUpd").classList.remove("hidden");
     }
   } catch (e) {}
@@ -482,6 +504,13 @@ async function desk() {
   } catch (e) { $("deskBox").innerHTML = `<p class="err">${esc(e.message)}</p>`; }
 }
 $("deskRe").onclick = desk;
+(function bgSetup() {          // shell v3: the phone's background link (Find my phone)
+  if (!(Shell && Shell.getBackground)) return;
+  $("bgBox").classList.remove("hidden");
+  const show = () => { try { const b = JSON.parse(Shell.getBackground()); $("bgLink").checked = b.on;
+    $("bgInfo").textContent = !b.on ? "Off: the PC can't ring this phone." : b.last_ok ? `Connected to the desktop ${Math.round((Date.now() - b.last_ok) / 1000)} s ago. Uses very little battery (one check-in about every 25 s).` : "Starting…"; } catch (e) {} };
+  $("bgLink").onchange = () => { Shell.setBackground($("bgLink").checked); setTimeout(show, 1500); }; show(); setInterval(show, 15000);
+})();
 $("unpair").onclick = async () => { if (!(await ask("Forget the pairing key?"))) return; localStorage.removeItem("npuKey"); if (Shell && Shell.unpair) Shell.unpair(); else location.reload(); };
 
 // ---------- start ----------

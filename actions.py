@@ -1,7 +1,7 @@
 """Allowlisted assistant actions for NpuStudio. No arbitrary commands, no deletion, no admin."""
 import os, re, json, glob, time, difflib, subprocess, ctypes, datetime, logging, webbrowser, urllib.parse
 
-CONFIRM = {"close_app", "sleep", "restart", "shutdown"}
+CONFIRM = {"close_app", "sleep", "restart", "shutdown", "empty_recycle_bin"}
 NOWIN = 0x08000000  # CREATE_NO_WINDOW
 
 SETTINGS = {"wifi": "network-wifi", "wi-fi": "network-wifi", "network": "network", "bluetooth": "bluetooth",
@@ -45,7 +45,7 @@ volume {"level": 0-100} | brightness_change {"delta": -100..100} | volume_change
 brightness {"level": 0-100} | dark_mode {"on": true|false} | screenshot {} | timer {"minutes": n, "message": text}
 battery {} | time {} | lock {} | sleep {} | restart {} | shutdown {}
 media {"key": play_pause|next|previous|stop} | search_files {"query": name} | clipboard_get {} | clipboard_set {"text": text}
-system_info {} | running_apps {}
+system_info {} | running_apps {} | night_light {} | empty_recycle_bin {} | recent_files {} | find_phone {}
 Examples:
 User: pull up the calculator -> ACTION: {"name": "open_app", "args": {"app": "calculator"}}
 User: make the screen dimmer -> ACTION: {"name": "brightness_change", "args": {"delta": -15}}
@@ -198,6 +198,13 @@ def route(text):
         parts = [route(p) for p in t.split(" and ") if p.strip()]
         spec = [p for p in parts if p and p["name"] != "open_app"]
         if spec: return spec[-1]
+    if re.search(r"\b(find|ring|locate|where('s| is| did i (put|leave))) (my )?(phone|cell|mobile)\b", t): return {"name": "find_phone", "args": {}}
+    if re.search(r"\bnight ?light\b|\bblue light\b", t) and not re.search(r"settings? page", t): return {"name": "night_light", "args": {}}
+    if re.search(r"\b(empty|clear|clean out) (the |my )?(recycle ?bin|trash|bin)\b", t): return {"name": "empty_recycle_bin", "args": {}}
+    if re.search(r"\b(recent|recently (opened|used)) (files|documents|docs)\b", t): return {"name": "recent_files", "args": {}}
+    if re.search(r"\b(turn on|turn off|enable|disable|switch on|switch off|toggle) (the )?(wi-?fi|bluetooth)\b", t):
+        return {"name": "settings", "args": {"page": "bluetooth" if "blue" in t else "wifi"}}
+    if re.search(r"\b(battery saver|power saving|save battery)\b", t): return {"name": "settings", "args": {"page": "battery saver"}}
     r = _route_more(t)
     if r: return r
     if re.fullmatch(r"(check|look|scan) for (windows )?updates", t): return {"name": "settings", "args": {"page": "windows update"}}
@@ -321,7 +328,7 @@ def parse_action(text, names=None):
 def describe(a):
     n, g = a["name"], a.get("args", {})
     return {"close_app": f"close {g.get('app', '?')}", "sleep": "put the PC to sleep", "restart": "restart the PC",
-            "shutdown": "shut down the PC", "open_url": f"open {g.get('url', '?')}"}.get(n, n)
+            "shutdown": "shut down the PC", "empty_recycle_bin": "empty the Recycle Bin (files in it are deleted for good)", "open_url": f"open {g.get('url', '?')}"}.get(n, n)
 
 def execute(a, confirm=None, timer_cb=None):
     """Run an allowlisted action. confirm(msg)->bool is required for CONFIRM actions. Returns a short result string."""
@@ -454,6 +461,15 @@ def _sysinfo(g, _):
             f"RAM: {(m.tp-m.ap)/2**30:.1f} of {m.tp/2**30:.1f} GB used ({m.load}%)\n"
             f"Disk {drive} {du.free/2**30:.0f} GB free of {du.total/2**30:.0f} GB\nUp for {int(up//86400)}d {int(up%86400//3600)}h {int(up%3600//60)}m")
 
+def _night(g, _):
+    _settings({"page": "night light"}, None); return "Opened Night light settings (Windows has no safe switch for apps - use the toggle there, or Win+A > Night light)."
+def _empty_bin(g, _):
+    r = ctypes.windll.shell32.SHEmptyRecycleBinW(None, None, 0x1 | 0x2 | 0x4)   # no confirm UI/progress/sound: we already asked
+    return "Recycle Bin emptied." if r in (0, -2147418113) else "The Recycle Bin is already empty." if r == -2147024809 else f"Couldn't empty the Recycle Bin (code {r})."
+def _recent(g, _):
+    os.startfile("shell:recent"); return "Opened Recent files."
+def _findphone(g, _):
+    import phonelink; return phonelink.find_phone()
 def _running(g, _):
     out = _ps("Get-Process | ? { $_.MainWindowTitle } | Sort-Object ProcessName -Unique | % { $_.ProcessName + ' - ' + $_.MainWindowTitle }")
     lines = [l.strip() for l in out.splitlines() if l.strip()]
@@ -464,44 +480,153 @@ ALL = {"open_app": _open_app, "close_app": _close_app, "open_url": _open_url, "w
        "brightness": _bright, "brightness_change": _bchange, "dark_mode": _dark, "screenshot": _shot, "timer": _timer,
        "battery": _battery, "time": _time, "lock": _lock, "sleep": _sleep, "restart": _restart, "shutdown": _shutdown,
        "media": _media, "search_files": _search_files, "clipboard_get": _clip_get, "clipboard_set": _clip_set,
-       "system_info": _sysinfo, "running_apps": _running}
+       "system_info": _sysinfo, "running_apps": _running, "night_light": _night, "empty_recycle_bin": _empty_bin,
+       "recent_files": _recent, "find_phone": _findphone}
 
 # ---------------- phone actions (run by the Android app, not here) ----------------
 PHONE = ["open_app", "flashlight", "volume", "volume_change", "mute", "unmute", "alarm", "timer", "open_url", "web_search",
-         "battery", "clipboard_set", "notify", "time", "save_image", "share_image"]
-PHONE_CONFIRM = {"open_url"}
+         "battery", "clipboard_set", "notify", "time", "save_image", "share_image",
+         # Companion v2.1 (shell 3)
+         "brightness", "brightness_change", "brightness_auto", "dnd", "ring_mode", "rotation_lock", "settings_panel", "keep_screen_on",
+         "camera", "navigate", "maps_search", "call", "sms", "calendar_event", "media", "storage", "network", "note", "notes",
+         "speak", "app_settings", "find_phone", "stop_sound"]
+PHONE_V3 = set(PHONE[PHONE.index("brightness"):])
+PHONE_CONFIRM = {"open_url", "call", "sms"}
 PHONE_PROMPT = """You are a helpful, concise assistant. The user is chatting from their ANDROID PHONE, and you control the PHONE (not a PC).
 When the user asks you to DO something on the phone, reply with exactly one line:
 ACTION: {"name": "<name>", "args": {...}}
-Available phone actions:
-open_app {"app": name} | flashlight {"on": true|false} | volume {"level": 0-100} | volume_change {"delta": -100..100} | mute {} | unmute {}
-alarm {"hour": 0-23, "minute": 0-59, "message": text} | timer {"minutes": n, "message": text} | open_url {"url": url} | web_search {"query": text}
-battery {} | clipboard_set {"text": text} | notify {"title": text, "text": text} | time {} | save_image {} | share_image {}
+Available phone actions (use ONLY these; never swap one kind for another, e.g. never use volume for brightness):
+open_app {"app": name} | flashlight {"on": true|false} | volume {"level": 0-100, "stream": media|ring|alarm|notification|call} | volume_change {"delta": -100..100, "stream": ...} | mute {} | unmute {}
+brightness {"level": 0-100} | brightness_change {"delta": -100..100} | brightness_auto {"on": true|false} | dnd {"on": true|false} | ring_mode {"mode": normal|vibrate|silent}
+rotation_lock {"on": true|false} | keep_screen_on {"on": true|false} | settings_panel {"panel": wifi|bluetooth|internet|nfc|location|volume|display|airplane|battery}
+alarm {"hour": 0-23, "minute": 0-59, "message": text} | timer {"minutes": n, "message": text} | calendar_event {"title": text, "start": "YYYY-MM-DD HH:MM", "minutes": n}
+open_url {"url": url} | web_search {"query": text} | navigate {"place": text} | maps_search {"query": text} | camera {"mode": photo|video}
+call {"who": name or number} | sms {"who": name or number, "text": text} | media {"cmd": play|pause|play_pause|next|previous}
+battery {} | storage {} | network {} | clipboard_set {"text": text} | notify {"title": text, "text": text} | note {"text": text} | notes {}
+speak {"text": text} | app_settings {"app": name} | find_phone {} | stop_sound {} | time {} | save_image {} | share_image {}
+If the phone can't do it, say "I can't do that on the phone yet." in plain text.
 Examples:
 User: turn on the flashlight -> ACTION: {"name": "flashlight", "args": {"on": true}}
+User: set brightness to 70% -> ACTION: {"name": "brightness", "args": {"level": 70}}
 User: wake me up at 6:30 -> ACTION: {"name": "alarm", "args": {"hour": 6, "minute": 30, "message": "Wake up"}}
 User: open spotify -> ACTION: {"name": "open_app", "args": {"app": "spotify"}}
 For normal questions, just answer in plain text without ACTION."""
 
+PHONE_HINT = ("Commands run on this phone: apps, flashlight, volume (media/ring/alarm/notification/call), brightness and auto-brightness, "
+              "Do Not Disturb, ring/vibrate/silent, rotation lock, keep screen on, Wi-Fi/Bluetooth/data/NFC/location panels, camera, "
+              "navigate/maps, call or text (you tap send), calendar events, play/pause/next, alarms/timers, battery/storage/network, "
+              "notes, read aloud, app settings, find my phone, links, clipboard, save/share the last picture.")
+_ON = r"\b(off|disable|stop|deactivate)\b"
+def _on(t): return not re.search(_ON, t)
+def _num(t):
+    m = re.search(r"(\d{1,3})\s*(%|percent)?", t); return int(m.group(1)) if m else None
+def _stream(t):
+    m = re.search(r"\b(ring(?:er|tone)?|alarm|notifications?|call|in-call|media|music)\b(?= volume| sound| level)|\bvolume (?:of|for) (?:the )?(ring(?:er)?|alarms?|notifications?|calls?|media)\b", t)
+    if not m: return None
+    w = (m.group(1) or m.group(2)).rstrip("s")
+    return {"ringer": "ring", "ringtone": "ring", "music": "media", "in-call": "call"}.get(w, w)
+
+def family(name_or_text, is_text=False):
+    """Coarse kind of a request/action, used so a request never runs a different KIND of action."""
+    if is_text:
+        t = name_or_text
+        if re.search(r"\bbright|\bdim\b|\bdimmer\b|\bdarker\b|screen (light|lighter)", t): return "brightness"
+        if re.search(r"\b(volume|louder|quieter|softer|mute|unmute)\b", t): return "sound"
+        if re.search(r"\b(flash ?light|torch)\b", t): return "torch"
+        return None
+    return {"brightness": "brightness", "brightness_change": "brightness", "brightness_auto": "brightness",
+            "volume": "sound", "volume_change": "sound", "mute": "sound", "unmute": "sound", "ring_mode": "sound",
+            "flashlight": "torch"}.get(name_or_text)
+
+def phone_guard(text, a):
+    """None if the action is a different kind than the request asked for (e.g. brightness -> volume)."""
+    if not a: return None
+    if a["name"] not in PHONE: return None
+    want = family(text.lower(), True); got = family(a["name"])
+    if want and got and want != got: return None
+    if want and not got and a["name"] not in ("settings_panel",): return None
+    return a
+
+CANT = "I can't do that on the phone yet."
 def route_phone(text):
     t = text.lower().strip().rstrip(".!?")
-    t = re.sub(r"^(please |can you |could you |hey |would you )+", "", t); t = re.sub(r"\s+(please|for me|now)$", "", t)
-    if re.search(r"\b(flash ?light|torch)\b", t): return {"name": "flashlight", "args": {"on": not re.search(r"\b(off|disable|stop)\b", t)}}
+    t = re.sub(r"^(please |can you |could you |hey |would you |ok |okay )+", "", t); t = re.sub(r"\s+(please|for me|now)$", "", t)
+    A = lambda n, **g: {"name": n, "args": g}
+    if re.search(r"\b(stop (the )?(sound|ringing|alarm sound|noise)|found it|i found (it|my phone))\b", t): return A("stop_sound")
+    if re.search(r"\b(find|ring|locate)( my)? (phone|cell|mobile)\b|\bwhere('s| is| did i (put|leave)) my (phone|cell|mobile)\b|\bmake (my )?phone (ring|beep|loud)", t): return A("find_phone")
+    if re.search(r"\b(flash ?light|torch)\b", t): return A("flashlight", on=_on(t))
+    # brightness (never volume)
+    if re.search(r"\b(auto(matic)?[- ]?brightness|adaptive brightness)\b", t): return A("brightness_auto", on=_on(t))
+    if re.search(r"\bbright|\bdim\b|\bdimmer\b|\bdarker\b|\bscreen (light|lighter)", t) and not re.search(r"dark (mode|theme)", t):
+        if re.search(r"\b(max(imum)?|full|brightest|all the way up)\b", t): return A("brightness", level=100)
+        if re.search(r"\b(min(imum)?|lowest|dimmest|all the way down)\b", t): return A("brightness", level=0)
+        n = _num(t)
+        if n is not None and re.search(r"\b(to|at|=|set|by)\b|%|percent", t):
+            if re.search(r"\b(by|up|down|more|less|increase|decrease|lower|raise)\b", t) and not re.search(r"\b(to|at)\b", t):
+                return A("brightness_change", delta=-n if re.search(r"\b(down|less|decrease|lower|dim)", t) else n)
+            return A("brightness", level=min(100, n))
+        if re.search(r"\b(dim|dimmer|darker|down|lower|decrease|less|reduce)\b", t): return A("brightness_change", delta=-20)
+        return A("brightness_change", delta=20)
+    if re.search(r"\b(do not disturb|don't disturb|dnd)\b", t): return A("dnd", on=_on(t))
+    if re.search(r"\b(vibrat(e|ion) mode|(set|put|switch) (my |the )?phone (to|on) vibrat|^vibrate( mode)?$|ringer (to|on) vibrat)", t): return A("ring_mode", mode="vibrate")
+    if re.search(r"\b(silent mode|silence (my |the )?phone|(set|put) (my |the )?phone (to|on) silent|ringer (to|on) silent|^silent$)", t): return A("ring_mode", mode="silent")
+    if re.search(r"\b(ringer on|turn (on )?the ringer( on)?|normal (ring(er)?|sound) mode|sound mode|ring mode|turn off silent|unsilence)\b", t): return A("ring_mode", mode="normal")
+    if re.search(r"\b(rotation lock|lock (the )?(screen )?rotation|portrait lock)\b", t): return A("rotation_lock", on=_on(t))
+    if re.search(r"\bauto[- ]?rotat", t): return A("rotation_lock", on=not _on(t))
+    if re.search(r"\bkeep (the )?screen (on|awake)|screen (stay|staying) on|don't let the screen (turn off|sleep)", t): return A("keep_screen_on", on=not re.search(r"\b(stop|don't keep|let it)\b", t) or "don't let" in t)
+    st = _stream(t)
+    if st and re.search(r"\bvolume|sound\b", t):
+        n = _num(t)
+        if re.search(r"\b(max|full)\b", t): return A("volume", level=100, stream=st)
+        if n is not None: return A("volume", level=min(100, n), stream=st)
+        return A("volume_change", delta=-15 if re.search(r"\b(down|lower|quieter|decrease)\b", t) else 15, stream=st)
+    m = re.search(r"\b(wi-?fi|bluetooth|mobile data|cellular data|data|internet|nfc|location|gps|airplane mode|hotspot)\b", t)
+    if m and re.search(r"\b(turn|switch|enable|disable|toggle|open|show|settings?|panel|connect|on|off)\b", t) and not re.search(r"\b(what|which|am i)\b", t):
+        k = m.group(1); k = {"gps": "location", "mobile data": "internet", "cellular data": "internet", "data": "internet", "hotspot": "internet"}.get(k, k)
+        return A("settings_panel", panel=k)
+    if re.search(r"\b(what|which) (network|connection)|\bnetwork type|connection type|am i (on|using) (wi-?fi|data|mobile data)|\bam i connected\b", t): return A("network")
+    if re.search(r"\b(storage|free space|space left|how much space)\b", t): return A("storage")
+    if re.search(r"\b(record (a )?video|video camera|open (the )?camera in video)\b", t): return A("camera", mode="video")
+    if re.search(r"\b(open (the )?camera|take a (photo|picture|selfie|pic)|camera app)\b", t): return A("camera", mode="photo")
+    m = re.match(r"(?:navigate|directions|get directions|take me|drive|walk|route) to (.+)$", t) or re.match(r"how do i get to (.+)$", t)
+    if m: return A("navigate", place=m.group(1))
+    m = re.match(r"(?:search (?:google )?maps for|find (?:a |the )?|show me (?:a |the )?|where(?:'s| is) the nearest )(.+?)(?: on (?:the )?map| near me| nearby| around here)$", t) or re.match(r"search (?:google )?maps for (.+)$", t)
+    if m: return A("maps_search", query=m.group(1))
+    m = re.match(r"(?:call|dial|phone|ring) (.+)$", t)
+    if m: return A("call", who=m.group(1))
+    m = re.match(r"(?:text|sms|message|send (?:a )?(?:text|message|sms) to) (.+?)(?: (?:saying|that|to say|:)\s*(.+))?$", t)
+    if m and not re.search(r"\b(clipboard|aloud)\b", t): return A("sms", who=m.group(1), text=(m.group(2) or ""))
+    m = re.match(r"(?:add|create|make|put|schedule) (?:a |an )?(?:new )?(?:calendar )?(?:event|appointment|meeting)(?: (?:called|named|for))?\s*(.*)$", t) or re.match(r"(?:add|put) (.+?) (?:to|on|in) (?:my )?calendar$", t)
+    if m: return A("calendar_event", title=(m.group(1) or "Event").strip() or "Event")
+    if re.fullmatch(r"(next|skip)( (song|track))?|skip (this )?(song|track)|play (the )?next (song|track)", t): return A("media", cmd="next")
+    if re.fullmatch(r"(previous|last|go back)( (song|track))?|play (the )?previous (song|track)", t): return A("media", cmd="previous")
+    if re.fullmatch(r"(pause|stop)( (the )?(music|song|video|media|playback))?", t): return A("media", cmd="pause")
+    if re.fullmatch(r"(play|resume|unpause|continue)( (the )?(music|song|video|media|playback))?", t): return A("media", cmd="play")
+    if re.search(r"\b(show|read|list|what are) (me )?(my )?(last |recent )?notes\b", t): return A("notes")
+    m = re.match(r"(?:take a note|make a note|note|note down|write down|remember(?: that)?|jot down)(?: that)?[:,]?\s+(.+)$", t)
+    if m: return A("note", text=m.group(1))
+    m = re.match(r"(?:read|say|speak)(?: this| it| the following)?(?: out loud| aloud)?[:,]?\s+(.+?)(?: out loud| aloud)?$", t)
+    if m and re.search(r"\b(aloud|out loud|speak|say)\b", t): return A("speak", text=m.group(1))
+    m = re.match(r"(?:open )?(?:the )?(?:app )?settings for (.+)$", t) or re.match(r"(?:open )?(.+?) app (?:settings|info)$", t)
+    if m: return A("app_settings", app=m.group(1))
     m = re.search(r"(?:alarm|wake me(?: up)?)\b.*?\b(\d{1,2})(?::(\d{2}))?\s*(am|pm|a\.m\.|p\.m\.)?", t)
     if m:
         h = int(m.group(1)); mi = int(m.group(2) or 0); ap = (m.group(3) or "").replace(".", "")
         if ap == "pm" and h < 12: h += 12
         if ap == "am" and h == 12: h = 0
-        return {"name": "alarm", "args": {"hour": h % 24, "minute": mi % 60, "message": "NpuStudio alarm"}}
-    if re.search(r"\b(save|download) (the |this |that )?(last )?(picture|image|photo|result)\b", t): return {"name": "save_image", "args": {}}
-    if re.search(r"\bshare (the |this |that )?(last )?(picture|image|photo|result)\b", t): return {"name": "share_image", "args": {}}
+        return A("alarm", hour=h % 24, minute=mi % 60, message="NpuStudio alarm")
+    if re.search(r"\b(save|download) (the |this |that )?(last )?(picture|image|photo|result)\b", t): return A("save_image")
+    if re.search(r"\bshare (the |this |that )?(last )?(picture|image|photo|result)\b", t): return A("share_image")
     m = re.match(r"copy (.+?) to (?:my |the )?clipboard$", t)
-    if m: return {"name": "clipboard_set", "args": {"text": m.group(1).strip("\"' ")}}
+    if m: return A("clipboard_set", text=m.group(1).strip("\"' "))
     m = re.match(r"(?:notify me|send (?:me )?a notification|remind me now)(?: that| saying| to)? (.+)$", t)
-    if m: return {"name": "notify", "args": {"title": "NpuStudio", "text": m.group(1)}}
+    if m: return A("notify", title="NpuStudio", text=m.group(1))
     a = route(text)        # shared phrasing: volume, mute, timer, battery, time, open url, web search, open app
-    if a and a["name"] in PHONE: return a
+    if a and a["name"] in PHONE: return phone_guard(t, a) or {"name": "_cant", "args": {"text": CANT}}
+    if a: return {"name": "_cant", "args": {"text": CANT}}     # a PC-only ability (screenshot, lock, dark mode...): never substitute
     return None
 
 def describe_phone(a):
-    g = a.get("args", {}); return {"open_url": f"open {g.get('url', '?')} on the phone"}.get(a["name"], a["name"])
+    g = a.get("args", {})
+    return {"open_url": f"open {g.get('url', '?')} on the phone", "call": f"call {g.get('who', '?')}",
+            "sms": f"start a text to {g.get('who', '?')}"}.get(a["name"], a["name"])
