@@ -254,7 +254,7 @@ def api_job(kind, a, j):
     if kind == "gen":
         import imagegen, cudaeng
         tw, th = int(a.get("width", 768)), int(a.get("height", 768)); (w, h), up = imagegen.plan_for(tw, th)
-        im = cudaeng.gen(a["prompt"], w, h, int(a.get("steps", 4)), int(a.get("seed", 42)), progress=prog, status=stat)
+        im = cudaeng.gen(a["prompt"], w, h, max(1, min(50, int(a.get("steps") or 50))), int(a.get("seed", 42)), progress=prog, status=stat)
         upn = "Fast (Intel SR-1032)" if str(a.get("upscaler", "sharp")).lower() == "fast" else "Sharp (Real-ESRGAN x4plus)"
         if up > 1: stat(f"upscaling {up}x ({upn.split(' (')[0]})..."); im = upscaler(upn).upscale_to(im, up, prog)
         im = imagegen.fit_crop(im, tw, th); fx = ""
@@ -263,7 +263,7 @@ def api_job(kind, a, j):
                 import facefix; stat("auto-fixing faces/eyes..."); im2, fx, ok = facefix.fix(im, "eyes", a.get("prompt", ""), progress=prog, status=stat, min_gain=0.0)
                 if ok: im = im2
             except Exception: logging.exception("gen auto face fix"); fx = "face fix failed"
-        meta = {"prompt": a.get("prompt", ""), "seed": int(a.get("seed", 42)), "steps": int(a.get("steps", 4)), "width": tw, "height": th, "model": "imagegen"}
+        meta = {"prompt": a.get("prompt", ""), "seed": int(a.get("seed", 42)), "steps": max(1, min(50, int(a.get("steps") or 50))), "width": tw, "height": th, "model": "imagegen"}
         im.info["npustudio_gen"] = json.dumps(meta)
         return {"image": imgb64(im), "device": "NVIDIA", "facefix": fx, "gen_meta": meta, **save_out(im, "gen", stat, a.get("prompt", ""))}
     if kind == "regen":      # "Regenerate with tweaks": rerun Image Gen with the original prompt/seed + a NON-body change
@@ -274,7 +274,7 @@ def api_job(kind, a, j):
         if not aichange.gen_loose(g, tw_): raise ValueError("Regenerate with tweaks is for outfits, background, hair, accessories or art style - not body or face changes. Nothing was changed.")
         tw2 = re.sub(r"(?i)^(please\s+)?(change|make|turn|give|add|put|switch|swap|replace)\s+(it|her|him|them|the\s+\w+)?\s*(to|into|with)?\s*", "", tw_)
         base = aichange.gen_prompt_for(g, None, bool(re.search(aichange.GARMENT_WORDS, tw_)))
-        return api_job("gen", {**a, "prompt": (tw2 + ", " + base).strip(", "), "seed": g.get("seed", 42), "steps": g.get("steps", 4),
+        return api_job("gen", {**a, "prompt": (tw2 + ", " + base).strip(", "), "seed": g.get("seed", 42), "steps": g.get("steps", 50),
                                "width": g.get("width", 768), "height": g.get("height", 768), "upscaler": a.get("upscaler", "sharp"), "autofix": True}, j)
     if kind == "upscale":
         name = "Sharp (Real-ESRGAN x4plus)" if a.get("model", "sharp") == "sharp" else "Fast (Intel SR-1032)"

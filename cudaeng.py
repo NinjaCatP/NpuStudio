@@ -63,7 +63,7 @@ def inpaint(rg512, mk512, prompt, steps=30, strength=1.0, guidance=7.5, seed=1, 
                  negative_prompt=negative or "blurry, deformed, low quality", generator=torch.Generator("cuda").manual_seed(int(seed)),
                  callback_on_step_end=_cb(progress, n)).images[0]
 
-def gen(prompt, w, h, steps=4, seed=1, progress=None, status=None):
+def gen(prompt, w, h, steps=50, seed=1, progress=None, status=None):
     import torch
     with _lock:
         p = _pipe("lcm", status)

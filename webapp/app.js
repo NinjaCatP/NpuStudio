@@ -1,7 +1,7 @@
 // NpuStudio Companion web UI. Served by the desktop at /app; the Android shell (window.NpuShell) is optional.
 "use strict";
 const $ = id => document.getElementById(id);
-const UI_VERSION = "1.6.9";
+const UI_VERSION = "1.7.0";
 const Shell = window.NpuShell || null;
 const shellVersion = Shell && Shell.shellVersion ? Number(Shell.shellVersion()) : 0;
 
@@ -276,7 +276,7 @@ $("genGo").onclick = async () => {
   const p = $("genPrompt").value.trim(); if (!p) return $("genPrompt").focus();
   const [w, h] = genTarget();
   if (!(w >= 64 && h >= 64 && w <= 16384 && h <= 16384)) return notice("Size must be between 64 and 16384 on each side.");
-  const r = await runJob({ type: "gen", prompt: p, width: w, height: h, steps: +$("genSteps").value || 4, seed: +$("genSeed").value || 0, upscaler: $("genUp").value, autofix: $("genFix").checked }, $("genJob"), "Image Gen",
+  const r = await runJob({ type: "gen", prompt: p, width: w, height: h, steps: Math.min(50, +$("genSteps").value || 50), seed: +$("genSeed").value || 0, upscaler: $("genUp").value, autofix: $("genFix").checked }, $("genJob"), "Image Gen",
     { btn: $("genGo"), done: (r, s) => `Done in ${s} s · ${w}×${h}` });
   if (r) { showResult($("genOut"), r, "npustudio-gen", `· ${w}×${h}`); addSend($("genOut"), r.image, r.gen_meta); }
 };
@@ -638,3 +638,6 @@ async function start() {
 $("pairBtn").onclick = () => { localStorage.setItem("npuKey", $("pairKey").value.trim()); $("pairMsg").textContent = ""; start(); };
 setInterval(async () => { if (!key()) return; try { await ping(); connPill(true); } catch (e) { connPill(false); if (SV && Shell.fallback) Shell.fallback(); } }, 10000);
 start();
+
+// remember the last-used Gen steps on this phone (default 50)
+(function () { const e = $("genSteps"); if (!e) return; const v = localStorage.getItem("npuGenSteps"); if (v) e.value = v; e.addEventListener("change", () => localStorage.setItem("npuGenSteps", e.value)); })();

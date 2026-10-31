@@ -3,6 +3,7 @@ import numpy as np
 from PIL import Image
 APP = os.path.dirname(os.path.abspath(__file__))
 REPO = "OpenVINO/LCM_Dreamshaper_v7-int8-ov"
+DEFAULT_STEPS = 50; MAX_STEPS = 50   # LCM: its scheduler is built on 50 original steps, so 50 is also its ceiling
 GDIR = os.path.join(APP, "models", "lcm-dreamshaper-v7-int8")
 CACHE = os.path.join(APP, "models", "cache")
 COMBOS = [("GPU", "NPU", "GPU"), ("CPU", "NPU", "CPU"), ("GPU", "GPU", "GPU"), ("CPU", "CPU", "CPU")]
@@ -61,7 +62,7 @@ class ImageGen:
                 self.err.append(f"{c}: {e}"); logging.warning("imagegen compile %s failed: %s", c, e)
         raise RuntimeError("No device combo worked: " + " | ".join(self.err)[:600])
 
-    def generate(self, prompt, neg="", steps=4, seed=42, w=512, h=512, progress=None, cancel=None):
+    def generate(self, prompt, neg="", steps=50, seed=42, w=512, h=512, progress=None, cancel=None):
         import devices
         import remote
         if (w, h) != self.size or self.pref != devices.get() or (self.devs and self.devs[0] in ("Desktop PC", "Laptop")) != remote.active(): self.build(w, h)
@@ -133,9 +134,9 @@ def build_gen_tab(root, nb, send_to_upscale=None, get_upscaler=None, up_models=N
     ng = ttk.Entry(top); ng.grid(row=1, column=1, columnspan=8, sticky="we", padx=4, pady=3)
     top.columnconfigure(1, weight=1)
     row = ttk.Frame(f); row.pack(fill="x", padx=6, pady=2)
-    stepsv = tk.IntVar(value=4); seedv = tk.StringVar(value="42"); sizev = tk.StringVar(value="512x512"); upv = tk.StringVar(value=(up_models or ["-"])[-1])
+    stepsv = tk.IntVar(value=50); seedv = tk.StringVar(value="42"); sizev = tk.StringVar(value="512x512"); upv = tk.StringVar(value=(up_models or ["-"])[-1])
     ttk.Label(row, text="Steps").pack(side="left")
-    ttk.Spinbox(row, from_=1, to=12, textvariable=stepsv, width=4).pack(side="left", padx=(2, 10))
+    ttk.Spinbox(row, from_=1, to=MAX_STEPS, textvariable=stepsv, width=4).pack(side="left", padx=(2, 10))
     ttk.Label(row, text="Seed").pack(side="left")
     ttk.Entry(row, textvariable=seedv, width=10).pack(side="left", padx=2)
     ttk.Button(row, text="Random", width=7, command=lambda: seedv.set(str(random.randint(0, 2**31 - 1)))).pack(side="left", padx=(0, 10))
@@ -206,7 +207,7 @@ def build_gen_tab(root, nb, send_to_upscale=None, get_upscaler=None, up_models=N
         if not prompt: status.set("Type a prompt first."); return
         try: seed = int(seedv.get())
         except ValueError: seed = random.randint(0, 2**31 - 1); seedv.set(str(seed))
-        tw, th = target(); (w, h), up = plan_for(tw, th); upname = next((m for m in (up_models or []) if m.startswith(upv.get())), None); steps = max(1, min(12, int(stepsv.get() or 4))); neg = ng.get()
+        tw, th = target(); (w, h), up = plan_for(tw, th); upname = next((m for m in (up_models or []) if m.startswith(upv.get())), None); steps = max(1, min(MAX_STEPS, int(stepsv.get() or DEFAULT_STEPS))); neg = ng.get()
         st["busy"] = True; __import__("busy").mark("Image Gen", True); st["cancel"] = False; gb.configure(text="Stop"); pb.configure(value=0)
         def work():
             try:
