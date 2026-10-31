@@ -2,8 +2,15 @@
 import os, json, logging
 APP = os.path.dirname(os.path.abspath(__file__)); MD = os.path.join(APP, "models")
 PREF = os.path.join(MD, "device.json"); BENCH = os.path.join(MD, "devbench.json")
-CHOICES = ["Auto", "NPU", "Intel Arc", "NVIDIA", "All", "Desktop PC", "Both machines"]
-REMOTE = ("Desktop PC", "Both machines")  # handled by remote.py; local chips then run as Auto
+CHOICES = ["Auto", "NPU", "Intel Arc", "NVIDIA", "All", "Desktop PC", "Both machines", "Laptop NPU", "Laptop Intel Arc", "Laptop RTX 4070"]
+REMOTE = ("Desktop PC", "Both machines", "Laptop NPU", "Laptop Intel Arc", "Laptop RTX 4070")  # handled by remote.py; local chips then run as Auto
+def remote_choices():
+    """Laptop (paired to a desktop): Desktop PC + Both machines. Desktop (runs the server): the laptop's chips + Both machines."""
+    try:
+        import remote
+        if remote.role() == "desktop": return ["Laptop NPU", "Laptop Intel Arc", "Laptop RTX 4070", "Both machines"]
+    except Exception: pass
+    return ["Desktop PC", "Both machines"]
 # which hardware each feature can use (from testing on this laptop)
 #  key "cuda" = NVIDIA through torch/diffusers; OV names are mapped at runtime.
 FEATURE_HW = {
@@ -42,7 +49,7 @@ def present():
     m = ov_map(); return [c for c in ("NPU", "Intel Arc", "NVIDIA") if c in m]
 
 def choices():
-    p = present(); return ["Auto"] + p + (["All"] if len(p) > 1 else []) + list(REMOTE)
+    p = present(); return ["Auto"] + p + (["All"] if len(p) > 1 else []) + remote_choices()
 
 def get_raw():
     """The picker value, including Desktop PC / Both machines."""

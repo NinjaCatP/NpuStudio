@@ -1,4 +1,4 @@
-import os, sys, time, threading, logging, traceback, re, queue
+import os, sys, time, threading, logging, traceback, re, queue, json
 import numpy as np
 from PIL import Image, ImageTk, ImageFilter
 APP = os.path.dirname(os.path.abspath(__file__))
@@ -45,9 +45,9 @@ class Upscaler:
         self.err = []; self.workers = []  # (label, infer_fn)
         import remote; self.remote = None; rm = remote.mode()
         if rm and remote.active():
-            if rm == "Desktop PC":   # whole picture goes to the desktop, which tiles it on its own fastest chip
-                self.remote = "whole"; self.device = "Desktop PC"; self.th = self.tw = 256; self.m = 16
-                self.lock = threading.Lock(); logging.info("Upscaler %s on Desktop PC", name); return
+            if rm != "Both machines":   # whole picture goes to the other PC (Desktop PC, or Laptop NPU/Arc/RTX on the desktop)
+                self.remote = "whole"; self.device = rm; self.th = self.tw = 256; self.m = 16
+                self.lock = threading.Lock(); logging.info("Upscaler %s on %s", name, rm); return
             self.remote = "split"
         model = self.core.read_model(os.path.join(APP, "models", fn))
         feat = "upscale_" + self.kind; labels = devices.plan(feat, pref)
@@ -139,8 +139,10 @@ class Upscaler:
     def upscale_to(self, img, scale, progress=None):
         if self.remote == "whole":
             import remote
-            if remote.online(): return remote.call("upscale", self.name, img.convert("RGB"), int(scale), progress=progress)
-            raise RuntimeError("Desktop PC went offline - pick another Device or start NpuStudio-Server on the desktop")
+            if remote.online(): return remote.call("upscale", self.name, img.convert("RGB"), int(scale), progress=progress, device=remote.remote_device())
+            logging.warning("%s offline - upscaling on this PC", remote.peer()); remote._note["msg"] = f"{remote.peer()} offline - running on this PC"
+            if getattr(self, "_loc", None) is None: self._loc = Upscaler(self.name)   # remote is offline, so this builds on local chips
+            return self._loc.upscale_to(img, scale, progress)
         if self.remote == "split":
             import remote
             if remote.online() and img.size[1] >= 64: return self._split(img, scale, progress)
@@ -340,7 +342,7 @@ class ChatEngine:
         try: self.pipe.finish_chat()
         except Exception: pass
         import actions
-        self.target = getattr(self, "want_target", "pc")
+        self.target = getattr(self, "want_target", "pc"); self._rnew = True
         self.pipe.start_chat(actions.PHONE_PROMPT if self.target == "phone" else actions.TOOLS_PROMPT)
 
     def handle(self, q, on_text, confirm=None, timer_cb=None, on_action=None, target="pc"):
@@ -377,7 +379,28 @@ class ChatEngine:
             on_text(full if not full.lstrip().startswith(("ACTION", "{")) else "Sorry, I'm not sure how to do that. Try wording it like \"open notepad\" or \"volume to 30\".")
         return "model", None, None, n, dt
 
+    def _use_peer(self):
+        """Desktop with Device = Laptop NPU/Arc/RTX: chat runs on the laptop's LLM (its NPU), actions still run here."""
+        try:
+            import remote, devices
+            return remote.role() == "desktop" and devices.get_raw() in remote.LAPTOP_DEV and remote.online()
+        except Exception: return False
+
     def ask(self, text, on_token, max_new=400):
+        if self._use_peer():
+            import remote
+            seen = [""]
+            def on_text(full):
+                if full.startswith(seen[0]) and len(full) > len(seen[0]): on_token(full[len(seen[0]):]); seen[0] = full
+            t = time.time()
+            try:
+                r = remote.call("chat_ask", text, getattr(self, "target", "pc"), on_text=on_text, new=getattr(self, "_rnew", True))
+                self._rnew = False; on_text(r["text"]); self.last_device = "Laptop " + str(r.get("device"))
+                return r.get("tokens", 0), time.time() - t
+            except Exception as e:
+                logging.warning("laptop chat failed (%s) - answering here", e)
+                if seen[0]: return 0, time.time() - t
+        self.last_device = self.device
         self.stop = False; n = [0]
         def cb(sub):
             n[0] += 1; on_token(sub)
@@ -493,7 +516,7 @@ def build_chat_tab(root, nb, demo=None):
             try:
                 src, a, res, n, dt = st["eng"].handle(q, lambda s: ui(put, s), confirm, timer_cb)
                 if a is not None: ui(put, "\u2714 " + res, "act")
-                if n: ui(status.set, f"{n} tokens in {dt:.1f}s ({n/max(dt,1e-3):.1f} tokens/s) on {st['eng'].device}" + (f" - action picked by the AI" if a else ""))
+                if n: ui(status.set, f"{n} tokens in {dt:.1f}s ({n/max(dt,1e-3):.1f} tokens/s) on {getattr(st['eng'], 'last_device', None) or st['eng'].device}" + (f" - action picked by the AI" if a else ""))
                 else: ui(status.set, "Done (understood instantly, no AI needed).")
             except Exception as e:
                 logging.exception("chat"); ui(status.set, f"Error: {e}")
@@ -680,7 +703,8 @@ def gui():
         w = tk.Toplevel(root); w.title("NpuStudio - Chip Monitor"); mon["win"] = w; w.resizable(True, True)
         w.geometry(f"{int(sw*0.42)}x{int(sh*0.7)}+{int(sw*0.29)}+{int(sh*0.12)}")
         COL = {"NPU": ("#a970ff", "#2e1f4a"), "Intel Arc": ("#87cefa", "#1d3a4d"), "NVIDIA": ("#76b900", "#253a00"),
-               "Desktop PC": ("#ff9f1a", "#4a2e05")}
+               "Desktop PC": ("#ff9f1a", "#4a2e05"), "Laptop NPU": ("#a970ff", "#2e1f4a"), "Laptop Intel Arc": ("#87cefa", "#1d3a4d"),
+               "Laptop NVIDIA": ("#76b900", "#253a00")}
         top = tk.StringVar(master=w, value="Starting..."); ttk.Label(w, textvariable=top, foreground="#555").pack(anchor="w", padx=10, pady=(6, 0))
         if mon["cnt"] is None:
             try:
@@ -688,7 +712,9 @@ def gui():
             except Exception as e: logging.exception("counter"); top.set(f"Counter error: {e}")
         cnt = mon["cnt"]; panes = {}
         chips = [c for c in ("NPU", "Intel Arc", "NVIDIA") if cnt and c in cnt.luids]
-        if remote.configured(): chips.append("Desktop PC")
+        lap = remote.role() == "desktop"
+        if lap: chips += ["Laptop NPU", "Laptop Intel Arc", "Laptop NVIDIA"]   # the laptop's chips (when NpuStudio is open there)
+        elif remote.configured(): chips.append("Desktop PC")
         if not chips: top.set("No NPU/GPU found in performance counters")
         # scrollable column of equal-height panels (fits the window; scrolls when it's made small)
         outer = tk.Frame(w, bg="#111"); outer.pack(fill="both", expand=True)
@@ -707,8 +733,11 @@ def gui():
             cv = tk.Canvas(f, bg="#111", highlightthickness=0, height=60); cv.pack(fill="both", expand=True)
             panes[c] = (v, cv, [0.0] * 120)
         dstate = {"i": None, "busy": False}
-        def dq():   # desktop health in the background (never blocks the UI)
-            try: dstate["i"] = remote.health(max_age=0.9)
+        def dq():   # other PC's numbers in the background (never blocks the UI)
+            try:
+                if lap:
+                    dstate["i"] = json.loads(remote._req("api/v1/monitor", timeout=2)[0]).get("chips") if remote.configured() else None
+                else: dstate["i"] = remote.health(max_age=0.9)
             except Exception: dstate["i"] = None
             finally: dstate["busy"] = False
         def draw(c, cv, hist):
@@ -724,9 +753,19 @@ def gui():
             except Exception: logging.exception("tick"); data = {}
             if cnt and data.get("_package") is not None:
                 top.set(f"CPU package power: {data['_package']:.1f} W (whole processor package, RAPL)   |   updates every second")
-            if "Desktop PC" in panes and not dstate["busy"]:
+            if ("Desktop PC" in panes or lap) and not dstate["busy"]:
                 dstate["busy"] = True; threading.Thread(target=dq, daemon=True).start()
             for c, (v, cv, hist) in panes.items():
+                if c.startswith("Laptop "):
+                    d = (dstate["i"] or {}).get(c[7:])
+                    if not d:
+                        hist.append(0.0); del hist[0]; v.set(f"{c}: " + ("offline (open NpuStudio on the laptop)" if dstate["i"] is None else "not reported") + "\n ")
+                    else:
+                        hist.append(d.get("use") or 0.0); del hist[0]
+                        pw = f"{d['watts']:.1f} W ({d['wnote']})" if d.get("watts") is not None else "N/A"
+                        tmp = f"   temp {d['temp']}\u00b0C" if d.get("temp") is not None else "   temp N/A"
+                        v.set(f"{c}:  {d.get('use', 0):5.1f}%   memory {d.get('ded', 0):,.0f} MB dedicated / {d.get('shared', 0):,.0f} MB shared\npower {pw}{tmp}")
+                    draw(c, cv, hist); continue
                 if c == "Desktop PC":
                     i = dstate["i"]
                     if not i:
@@ -777,6 +816,11 @@ def gui():
     deskv = tk.StringVar(value="")
     def pair():
         from tkinter import simpledialog
+        if remote.role() == "desktop":   # the laptop is found automatically; this is only for a manual address
+            h = simpledialog.askstring("Laptop", "NpuStudio finds the laptop by itself once NpuStudio is open there (with 'Share this laptop's chips' on).\n"
+                                       "Or type the laptop's address (192.168.x.x or Tailscale 100.x.x.x):", initialvalue=remote.cfg().get("host", ""), parent=root)
+            if not h: return False
+            h = h.strip().split(":")[0]; json.dump({"host": h, "port": 47860}, open(remote.LAPTOP, "w")); remote._h["t"] = 0; return True
         c = remote.cfg()
         h = simpledialog.askstring("Desktop PC", "Desktop PC address (shown in the NpuStudio-Server window):", initialvalue=c.get("host", ""), parent=root)
         if not h: return False
@@ -786,14 +830,18 @@ def gui():
     def desk_poll():
         def w():
             i = remote.health(force=True) if remote.configured() else None
-            txt = "" if not remote.configured() else (f"Desktop PC: online ({i.get('gpu', '?')})" if i else "Desktop PC: offline")
+            P = remote.peer()
+            txt = (f"{P}: online ({i.get('name', '')} {i.get('gpu', '?')})" if P == "Laptop" else f"{P}: online ({i.get('gpu', '?')})") if i else \
+                  (f"{P}: offline" if remote.configured() or P == "Laptop" else "")
             root.after(0, deskv.set, txt)
+            root.after(0, srv_paint)
         threading.Thread(target=w, daemon=True).start(); root.after(5000, desk_poll)
     def dev_changed(_=None):
         if devv.get() in devices.REMOTE:
             if not remote.configured() and not pair(): devv.set(devices.get_raw()); return
             if not remote.health(force=True):
-                status.set("Desktop PC is offline - start NpuStudio-Server.bat on the desktop. Jobs will run on this laptop until it is online.")
+                status.set("Desktop PC is offline - start NpuStudio-Server.bat on the desktop. Jobs will run on this laptop until it is online."
+                           if remote.peer() == "Desktop PC" else "Laptop is offline - open NpuStudio on the laptop (Server button green there). Jobs run on this PC until then.")
         devices.set(devv.get())
         with up_lock: st["ups"].clear()
         st["up"] = None; root.after(50, switch_model)
@@ -802,7 +850,37 @@ def gui():
     dcb = ttk.Combobox(topbar, textvariable=devv, values=devices.choices(), width=14, state="readonly"); dcb.pack(side="right", padx=4)
     dcb.bind("<<ComboboxSelected>>", dev_changed); ttk.Label(topbar, text="Device").pack(side="right")
     ttk.Label(topbar, textvariable=deskv, foreground="#0068b5").pack(side="right", padx=8)
-    ttk.Button(topbar, text="Pair desktop...", command=lambda: (pair(), remote.health(force=True))).pack(side="left")
+    ttk.Button(topbar, text="Pair desktop..." if remote.role() == "laptop" else "Laptop address...", command=lambda: (pair(), remote.health(force=True))).pack(side="left")
+    # Server button: this PC's worker server. Red = not running, green = running, amber = starting / error / port in use.
+    srvst = {"s": "stopped"}
+    SRVCOL = {"running": "#1e9e3a", "stopped": "#d32f2f", "starting": "#f0a000", "error": "#f0a000", "conflict": "#f0a000"}
+    srvb = tk.Menubutton(topbar, text="Server", relief="raised", fg="white", bg=SRVCOL["stopped"], activebackground=SRVCOL["stopped"], padx=8)
+    srvm = tk.Menu(srvb, tearoff=0); srvb["menu"] = srvm; srvb.pack(side="left", padx=6)
+    sharev = tk.BooleanVar(value=remote.sharing())
+    def share_toggle():
+        remote.set_sharing(sharev.get())
+        if sharev.get(): remote.start_share()
+        else: remote.stop_share()
+        root.after(1500, srv_check)
+    def srv_menu():
+        srvm.delete(0, "end"); s_ = srvst["s"]
+        lab = {"running": "Running (LAN + Tailscale, pairing key required)", "stopped": "Not running", "starting": "Starting...",
+               "error": "Error: " + (remote.local_error() or "see error.log")[:80], "conflict": "Port 47860 is in use by another program"}[s_]
+        srvm.add_command(label=lab, state="disabled")
+        if remote.role() == "laptop":
+            srvm.add_checkbutton(label="Share this laptop's chips", variable=sharev, command=share_toggle)
+            if s_ != "running" and sharev.get(): srvm.add_command(label="Start now", command=lambda: (remote.start_share(), root.after(1500, srv_check)))
+        elif s_ != "running": srvm.add_command(label="Start NpuStudio-Server", command=lambda: (remote.start_desktop_server(), root.after(3000, srv_check)))
+    srvm.configure(postcommand=srv_menu)
+    def srv_paint():
+        c = SRVCOL[srvst["s"]]; srvb.configure(bg=c, activebackground=c,
+            text={"running": "Server: on", "stopped": "Server: off", "starting": "Server: starting", "error": "Server: error", "conflict": "Server: port busy"}[srvst["s"]])
+    def srv_check():
+        def w(): srvst["s"] = remote.local_status(); root.after(0, srv_paint)
+        threading.Thread(target=w, daemon=True).start()
+    def srv_loop(): srv_check(); root.after(4000, srv_loop)
+    if remote.role() == "laptop" and remote.configured() and remote.sharing(): srvst["s"] = "starting"; remote.start_share()
+    root.after(200, srv_loop)
     root.after(1000, desk_poll)
     if "--monitor" in args: root.after(300, open_monitor)
     if "--size" in args: sizev.set(args[args.index("--size") + 1] + "x"); args = [a for a in args if a != args[args.index("--size") + 1]]

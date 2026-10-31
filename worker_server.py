@@ -84,11 +84,23 @@ def run(fn, args, kw, progress, status):
         if "progress" in ps: kw["progress"] = progress
         if "status" in ps: kw["status"] = status
         return f(*args, **kw)
-    if fn == "upscale":          # whole picture: (model name, image, scale)
-        name, im, scale = args; u = upscaler(name); status(f"Upscaling on desktop {u.device}...")
+    if fn == "upscale":          # whole picture: (model name, image, scale); kw device = chip on this machine (Laptop NPU...)
+        name, im, scale = args; u = upscaler(name, kw.get("device")); status(f"Upscaling on {socket.gethostname()} {u.device}...")
         return u.upscale_to(im, int(scale), progress)
     if fn == "tile":             # one 4x tile for split ("Both machines") upscales
         name, tile = args; u = upscaler(name); return u.workers[0][1](tile)
+    if fn == "chat_ask":         # the other PC's chat uses this PC's LLM (e.g. Phi-3.5 on the laptop NPU); actions stay on the caller
+        text, target = args[0], (args[1] if len(args) > 1 else "pc")
+        import npustudio
+        eng = chat_engine(status)
+        if kw.get("new") or getattr(eng, "target", "pc") != target: eng.want_target = target; eng.new_chat()
+        buf = []
+        def tok(t): buf.append(t); status("\x00" + "".join(buf))
+        n, dt = eng.ask(text, tok)
+        return {"text": "".join(buf), "tokens": n, "seconds": dt, "device": eng.device}
+    if fn == "chat_new":
+        if _chat["eng"]: _chat["eng"].new_chat()
+        return True
     if fn == "remove_bg": return ai().remove_bg(args[0], status)
     if fn == "erase": return ai().erase(args[0], args[1], status)
     if fn == "change": return ai().change(*args, progress=progress, status=status, **kw)
@@ -329,7 +341,7 @@ def api_post(h, p, data):
         try: return h._send(200, upscale_check(int(a["width"]), int(a["height"]), int(a["scale"])))
         except Exception as e: return h._send(400, {"error": str(e)})
     if p == ["report"]:      # the laptop app pushes its Chip Monitor numbers here so the phone can show them
-        a["_t"] = time.time(); REPORTS[str(a.get("name", "laptop"))[:40]] = a; return h._send(200, {"ok": True})
+        a["_t"] = time.time(); a["_ip"] = h.client_address[0]; REPORTS[str(a.get("name", "laptop"))[:40]] = a; return h._send(200, {"ok": True})
     if len(p) == 3 and p[0] == "jobs" and p[2] == "confirm":
         j = JOBS.get(p[1])
         if not j or j["state"] != "confirm": return h._send(409, {"error": "job is not waiting for a confirm"})
@@ -348,13 +360,61 @@ def api_post(h, p, data):
         threading.Thread(target=work, daemon=True).start(); return h._send(200, {"id": jid})
     h._send(404, {"error": "not found"})
 
+STATUS = os.path.join(MD, "server_status.json")
+def _status(**kw):
+    try: json.dump({"t": time.time(), "pid": os.getpid(), **kw}, open(STATUS + (".share" if SHARE else ""), "w"))
+    except Exception: pass
+
+_srv = {}
+def bind_all(port, fixed=None):
+    """Listen on 127.0.0.1 + the home-network address + any Tailscale address. Called again every 30 s, so a Tailscale
+    install (or a new Wi-Fi address) is picked up without a restart. Never binds 0.0.0.0."""
+    want = []
+    try: want.append(fixed or lan_ip())
+    except Exception: pass
+    want += tailscale_ips() + ["127.0.0.1"]
+    errs = []
+    for ip in want:
+        if ip in _srv: continue
+        try:
+            srv = ThreadingHTTPServer((ip, port), H); _srv[ip] = srv
+            threading.Thread(target=srv.serve_forever, daemon=True).start(); logging.info("listening on %s:%s", ip, port)
+        except OSError as e: errs.append(f"{ip}: {e}"); logging.warning("can't listen on %s:%s: %s", ip, port, e)
+    for ip in [i for i in _srv if i not in want]:   # address went away
+        try: _srv.pop(ip).shutdown()
+        except Exception: pass
+    conflict = any("10048" in e or "in use" in e.lower() for e in errs)
+    _status(state=("conflict" if conflict else "error") if errs and not _srv else "running", ips=list(_srv), port=port, error="; ".join(errs))
+    return list(_srv)
+
+def _parent_watch(pid):
+    """--share child: quit when the NpuStudio app that started it closes."""
+    import ctypes
+    k = ctypes.windll.kernel32; h = k.OpenProcess(0x00100000, False, pid)   # SYNCHRONIZE
+    if not h: os._exit(0)
+    k.WaitForSingleObject(h, 0xFFFFFFFF); os._exit(0)
+
+SHARE = "--share" in sys.argv
 if __name__ == "__main__":
-    c = config(); KEY = c["key"]; ips = [c.get("bind") or lan_ip()] + tailscale_ips() + ["127.0.0.1"]
-    for ip in ips:
-        srv = ThreadingHTTPServer((ip, int(c["port"])), H); threading.Thread(target=srv.serve_forever, daemon=True).start()
+    if SHARE:   # laptop: share this PC's chips with the paired desktop, using the same pairing key (models/remote.json)
+        logging.getLogger().handlers[0].setFormatter(logging.Formatter("%(asctime)s %(levelname)s [share] %(message)s"))
+        rc = json.load(open(os.path.join(MD, "remote.json"))); c = {"key": rc["key"], "port": int(rc.get("share_port", PORT))}
+        if "--parent" in sys.argv: threading.Thread(target=_parent_watch, args=(int(sys.argv[sys.argv.index("--parent") + 1]),), daemon=True).start()
+    else: c = config()
+    KEY = c["key"]; _status(state="starting", port=int(c["port"]))
+    ips = bind_all(int(c["port"]), None if SHARE else c.get("bind"))
+    def rebind():
+        while True:
+            time.sleep(30)
+            try: bind_all(int(c["port"]), None if SHARE else c.get("bind"))
+            except Exception: logging.exception("rebind")
+    threading.Thread(target=rebind, daemon=True).start()
+    if SHARE:
+        while True: time.sleep(3600)
     ip = ", ".join(ips)
     logging.info("NpuStudio server listening on %s port %s (LAN + Tailscale only)", ip, c["port"])
     print(f"NpuStudio desktop worker on {ip} port {c['port']}\nPairing key: {c['key']}\nOn the laptop: Device > Desktop PC, then enter this address and key once.\nPhone pairing QR: run Show-PairingQR.bat (opens http://127.0.0.1:{c['port']}/pair).\nClose this window to stop.", flush=True)
     try:
         while True: time.sleep(3600)
     except KeyboardInterrupt: pass
+    finally: _status(state="stopped")

@@ -10,6 +10,8 @@ An offline AI studio for Windows laptops with an **Intel Core Ultra NPU** and **
 - **Device picker** — Auto, NPU, Intel Arc, NVIDIA, or All (split work across chips).
 - **Chip Monitor** — live usage, memory, power and temperature for NPU, Arc and NVIDIA ("N/A" when a reading isn't available).
 
+- **Two-PC link** — the laptop can send work to the desktop (Desktop PC / Both machines), and the desktop can use the laptop's chips (Laptop NPU / Laptop Intel Arc / Laptop RTX 4070) for upscale, chat and gen. The laptop shares its chips automatically while NpuStudio is open ("Share this laptop's chips", on by default). A coloured **Server** button shows the status: green = on, red = off, amber = starting/error/port busy. If the other PC is offline, work runs locally. On the laptop, run `AllowShare-Firewall.ps1` once as admin.
+
 See [Features.txt](Features.txt) for the full list.
 
 ## Screenshots

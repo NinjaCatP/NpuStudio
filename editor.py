@@ -75,7 +75,7 @@ class AI:
         return devices
     def remove_bg(self, im, status=None):
         import remote
-        if remote.active(): r, d = remote.call("remove_bg", im, status=status); return r, "Desktop PC " + str(d)
+        if remote.active(): r, d = remote.call("remove_bg", im, status=status); return r, remote.peer() + " " + str(d)
         with self.lock:
             dv = self._check()
             if "isnet" not in self.m: self.m["isnet"] = OVModel("isnet", [1, 3, 1024, 1024], status, devs=dv.plan("isnet"), outputs=[0])
@@ -104,7 +104,7 @@ class AI:
 
     def erase(self, im, mask, status=None):
         import remote
-        if remote.active(): r, d = remote.call("erase", im, mask, status=status); return r, "Desktop PC " + str(d)
+        if remote.active(): r, d = remote.call("erase", im, mask, status=status); return r, remote.peer() + " " + str(d)
         with self.lock:
             dv = self._check()
             if "lama" not in self.m: self.m["lama"] = OVModel("lama", {"image": [1, 3, 512, 512], "mask": [1, 1, 512, 512]}, status, devs=dv.plan("lama"),

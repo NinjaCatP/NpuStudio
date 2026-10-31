@@ -119,3 +119,10 @@ The NpuStudio laptop app uses a compact binary form of the same jobs: `POST /job
 - `gen` job: `upscaler` sharp|fast. `change` job: `method`, `strength`, `grow` (-30..40 px), `whole`.
 - `chat` job: `device` = `pc` (default; allowlisted actions run on the desktop, CONFIRM ones wait for `/confirm`) or `phone` (nothing runs on the PC; the result has `phone_action {name, args}`, `needs_confirm`, `confirm_text` and the web UI runs it through `NpuShell.phoneAction`).
 - `/pair` (desktop only) also shows a combined Home + Tailscale QR when Tailscale is up.
+
+## v1.3 additions (reverse link: desktop uses the laptop's chips)
+- The laptop app starts `worker_server.py --share --parent <pid>` in the background while NpuStudio is open, if "Share this laptop's chips" is on (`models/share.json`, default on). It uses the same port (47860) and the desktop's pairing key from `models/remote.json`, so no extra pairing is needed. It exits when the app closes.
+- Both servers bind 127.0.0.1, the LAN IP and any Tailscale (100.64.0.0/10) IPs, never 0.0.0.0. They re-check bindings every 30 s, so Tailscale installed later is picked up. The status is in `models/server_status.json` (`.share` on the laptop): `{state: running|error|conflict|stopped, ips, port, error}`.
+- `POST /api/v1/report` (laptop → desktop) now includes `serve` (the share port), and the server records the sender's address as `_ip`. The desktop app reads it from `/api/v1/monitor` → `others` and caches it in `models/laptop.json`.
+- Internal wire jobs: `upscale` takes kw `device` (the chip on the serving machine). `chat_ask(text, target, new=bool)` runs the serving PC's chat LLM and streams text as status messages prefixed with `\x00`; the result is `{text, tokens, seconds, device}`. Actions still run on the caller. `chat_new` resets the chat.
+- Laptop firewall: `AllowShare-Firewall.ps1` (run as admin) allows TCP 47860 from LocalSubnet and 100.64.0.0/10 only.

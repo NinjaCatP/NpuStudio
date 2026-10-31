@@ -221,3 +221,8 @@ PC CHAT ACTIONS (desktop and laptop app; each PC controls itself)
 - Screenshot, timer/reminder, battery, time/date, lock, sleep/restart/shut down (ask first).
 - Search files by name in your user folders, read or set the clipboard, system info (CPU, GPU, RAM, disk, uptime), list open apps.
 - "Pair phone" button (top bar) shows the phone pairing QR, including the Tailscale address when the desktop has one.
+- Desktop can use the laptop's chips: device options Laptop NPU, Laptop Intel Arc, Laptop RTX 4070, and Both machines (split with the laptop). Used for upscale, chat (Phi on the laptop NPU; actions still run on the desktop) and gen. Falls back to local when the laptop is offline, and shows the laptop's online/offline status.
+- The laptop shares its chips automatically while NpuStudio is open ("Share this laptop's chips" in the Server menu, on by default). It is found automatically, with no extra pairing. Use "Laptop address..." to set it by hand.
+- Chip Monitor on the desktop shows the Laptop NPU / Intel Arc / NVIDIA panels.
+- Server button: green = running, red = off, amber = starting, error or port busy. The menu has start options.
+- Servers re-check their LAN/Tailscale bindings every 30 s.
