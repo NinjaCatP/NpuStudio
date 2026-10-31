@@ -229,6 +229,7 @@ def build_gen_tab(root, nb, send_to_upscale=None, get_upscaler=None, up_models=N
                 elif up > 1:
                     im = im.resize((w * up, h * up), Image.LANCZOS)
                 im = fit_crop(im, tw, th)
+                import outputs; outputs.autosave(im, "gen", prompt)
                 dt = time.time() - t; t_up = dt - t_draw
                 w, h = tw, th
                 st["img"] = im; logging.info("imagegen %s steps=%s seed=%s %.2fs %s", (w, h), steps, seed, dt, g.devs)

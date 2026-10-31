@@ -1,7 +1,7 @@
 // NpuStudio Companion web UI. Served by the desktop at /app; the Android shell (window.NpuShell) is optional.
 "use strict";
 const $ = id => document.getElementById(id);
-const UI_VERSION = "1.3.0";
+const UI_VERSION = "1.4.0";
 const Shell = window.NpuShell || null;
 const shellVersion = Shell && Shell.shellVersion ? Number(Shell.shellVersion()) : 0;
 
@@ -85,7 +85,7 @@ async function runJob(body, box, label, opts = {}) {
     const r = await xhrJson("GET", `jobs/${id}/result`, undefined, (k, f) => { if (k === "down") { if (f >= 0) { setBar(f); say(`Downloading result… ${Math.round(f * 100)}%`); } else say(`Downloading result… ${fmtMB(-f)}`); } });
     clearInterval(tick); cancel.remove(); bar.remove();
     const secs = ((Date.now() - t0) / 1000).toFixed(1);
-    if (opts.done || opts.keep) { msg.className = "small msg ok"; msg.textContent = "✓ " + (opts.done ? opts.done(r, secs) : `Done in ${secs} s`); el.textContent = ""; }
+    if (opts.done || opts.keep) { msg.className = "small msg ok"; msg.textContent = "✓ " + (opts.done ? opts.done(r, secs) : `Done in ${secs} s`) + savedLine(r); el.textContent = ""; }
     else card.remove();
     notifyDone("NpuStudio: " + label + " done", `Finished in ${secs} s`);
     return r;
@@ -98,9 +98,18 @@ async function runJob(body, box, label, opts = {}) {
 }
 const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
-function ask(q) {
+// Every desktop job keeps its full-size result in the desktop output folder.
+function savedLine(r) {
+  if (!r) return "";
+  if (r.saved_path) return `\nFull size ${r.full_width}×${r.full_height} saved on desktop: ${r.saved_path}` + (r.full_note ? `\n(${r.full_note})` : "");
+  return r.save_error ? `\n⚠ Couldn't save on the desktop: ${r.save_error}` : "";
+}
+// In-page dialogs: Android WebView silently drops window.alert/confirm, so never use them.
+function notice(q) { return ask(q, true); }
+function ask(q, okOnly) {
   return new Promise(res => {
     $("dlgQ").textContent = q; $("dlg").classList.remove("hidden");
+    $("dlgNo").classList.toggle("hidden", !!okOnly); $("dlgYes").textContent = okOnly ? "OK" : "Yes";
     const done = v => { $("dlg").classList.add("hidden"); res(v); };
     $("dlgYes").onclick = () => done(true); $("dlgNo").onclick = () => done(false);
   });
@@ -168,7 +177,7 @@ async function chatSend() {
   if (r.phone_action) {
     const pa = r.phone_action, a = document.createElement("div"); a.className = "act"; bot.appendChild(a);
     a.textContent = "📱 " + pa.name + " …";
-    if (r.needs_confirm && !confirm(`Do you want me to ${r.confirm_text || pa.name}?`)) a.textContent = "📱 Cancelled: " + (r.confirm_text || pa.name);
+    if (r.needs_confirm && !(await ask(`Do you want me to ${r.confirm_text || pa.name}?`))) a.textContent = "📱 Cancelled: " + (r.confirm_text || pa.name);
     else a.textContent = "📱 " + pa.name + " → " + await phoneAction(pa);
   } else if (r.target === "phone" && !r.text) bot.textContent = "(no reply)";
   if (r.action) { const a = document.createElement("div"); a.className = "act"; a.textContent = `⚙ ${r.action}${r.action_result ? " → " + r.action_result : ""}`; bot.appendChild(a); }
@@ -233,7 +242,7 @@ $("genRand").onclick = () => $("genSeed").value = Math.floor(Math.random() * 214
 $("genGo").onclick = async () => {
   const p = $("genPrompt").value.trim(); if (!p) return $("genPrompt").focus();
   const [w, h] = genTarget();
-  if (!(w >= 64 && h >= 64 && w <= 16384 && h <= 16384)) return alert("Size must be between 64 and 16384 on each side.");
+  if (!(w >= 64 && h >= 64 && w <= 16384 && h <= 16384)) return notice("Size must be between 64 and 16384 on each side.");
   const r = await runJob({ type: "gen", prompt: p, width: w, height: h, steps: +$("genSteps").value || 4, seed: +$("genSeed").value || 0, upscaler: $("genUp").value }, $("genJob"), "Image Gen",
     { btn: $("genGo"), done: (r, s) => `Done in ${s} s · ${w}×${h}` });
   if (r) { showResult($("genOut"), r, "npustudio-gen", `· ${w}×${h}`); addSend($("genOut"), r.image); }
@@ -320,13 +329,13 @@ function maskB64() {
 }
 const curB64 = () => ED.cur.split(",")[1];
 async function editJob(body, label) {
-  if (!ED.cur) return alert("Pick a photo first.");
+  if (!ED.cur) return notice("Pick a photo first.");
   document.querySelectorAll("#editTools button").forEach(b => b.disabled = true);
   const r = await runJob(body, $("editJob"), label, { done: (r, s) => `${label} done in ${s} s${r.device ? " on " + r.device : ""}` });
   document.querySelectorAll("#editTools button").forEach(b => b.disabled = false);
   if (r) { pushEdit("data:image/png;base64," + r.image); $("editOut").innerHTML = `<p class="muted small">${esc(label)} done on ${esc(r.device || "")} in ${r.seconds || "?"} s${r.method ? " · " + esc(r.method) : ""}. Undo to revert.</p>`; }
 }
-$("eraseGo").onclick = () => { const m = maskB64(); if (!m) return alert("Paint over what to erase first (tick Paint)."); editJob({ type: "erase", image: curB64(), mask: m }, "AI erase"); };
+$("eraseGo").onclick = () => { const m = maskB64(); if (!m) return notice("Paint over what to erase first (tick Paint)."); editJob({ type: "erase", image: curB64(), mask: m }, "AI erase"); };
 $("editBg").onclick = () => editJob({ type: "remove_bg", image: curB64() }, "Remove background");
 $("editStr").oninput = () => $("stV").textContent = (+$("editStr").value).toFixed(2);
 $("editGrow").oninput = () => $("grV").textContent = (+$("editGrow").value > 0 ? "+" : "") + $("editGrow").value;
@@ -355,51 +364,59 @@ $("upScreen").onchange = () => { localStorage.setItem("npuUpScreen", $("upScreen
 function screenPx() { const d = window.devicePixelRatio || 1, a = Math.round(screen.width * d), b = Math.round(screen.height * d); return [Math.max(a, b), Math.min(a, b)]; }
 $("upScreenSz").textContent = "(" + screenPx().join("×") + ")";
 // -> {scale, w, h, limited, already}: the smallest model pass that reaches the screen size; the server resizes the result to fit.
+const PHONE_SIDE = 16384, PHONE_MP = 160;
+// -> {scale (model passes to run), w, h (true final size), limited, capped, already}. Same rules as the server's phone_cap().
 function upPlan() {
   const sc = upScale; if (!upDim) return null;
-  const [w, h] = upDim, full = { scale: sc, w: w * sc, h: h * sc, limited: false, already: false };
-  if (!$("upScreen").checked) return full;
-  const [L, S] = screenPx(), f = Math.min(L / Math.max(w, h), S / Math.min(w, h));
-  if (f <= 1) return { scale: 0, w, h, limited: true, already: true };
-  if (f >= sc) return full;
-  const need = [2, 4, 8, 16].find(x => x >= f) || 16;
-  return { scale: Math.min(sc, need), w: Math.round(w * f), h: Math.round(h * f), limited: true, already: false };
+  const [w, h] = upDim;
+  let f = Math.min(sc, PHONE_SIDE / Math.max(w, h), Math.sqrt(PHONE_MP * 1e6 / (w * h))); const capped = f < sc;
+  let limited = false;
+  if ($("upScreen").checked) {
+    const [L, S] = screenPx(), fs = Math.min(L / Math.max(w, h), S / Math.min(w, h));
+    if (fs <= 1) return { scale: 0, w, h, limited: true, capped: false, already: true };
+    if (fs < f) { f = fs; limited = true; }
+  }
+  if (f >= sc) return { scale: sc, w: w * sc, h: h * sc, limited: false, capped: false, already: false };
+  const run = [2, 4, 8, 16].find(x => x >= f - 1e-9 && x <= sc) || sc;
+  return { scale: run, w: Math.min(PHONE_SIDE, Math.round(w * f)), h: Math.min(PHONE_SIDE, Math.round(h * f)), limited, capped: capped && !limited, already: false };
 }
+let upSeq = 0;
 async function upEstimate() {
-  const p = upPlan();
+  const seq = ++upSeq, p = upPlan();
   $("upPlan").innerHTML = !p ? "" : p.already
     ? `⚠ This picture (${p.w}×${p.h}) is already at or above your screen size. <a href="#" id="upOff">Turn off the screen limit</a> to upscale anyway.`
-    : `<b>${upScale}× → ${p.w}×${p.h}</b>${p.limited ? ` (screen limit${p.scale < upScale ? `, ${p.scale}× pass` : ""})` : ""}`;
+    : `<b>${upScale}× → ${p.w}×${p.h}</b>${p.limited ? " (screen limit" : p.capped ? " (phone max" : ""}${(p.limited || p.capped) ? (p.scale < upScale ? `, runs ${p.scale}× then resizes)` : ", resized after upscaling)") : ""}`;
   if ($("upOff")) $("upOff").onclick = e => { e.preventDefault(); $("upScreen").checked = true; $("upScreen").click(); };
+  $("upEst").innerHTML = "";
   if (!upDim) { $("upInfo").textContent = ""; return; }
   $("upInfo").textContent = `Picture ${upDim[0]}×${upDim[1]}`;
-  if (p && p.limited) { upChk = null; $("upEst").innerHTML = ""; return; }
-  try { upChk = await api("upscale/check", { width: upDim[0], height: upDim[1], scale: upScale }); } catch (e) { upChk = null; return; }
-  const c = upChk;
+  if (!p || p.already) return;
+  let c; try { c = await api("upscale/check", { width: upDim[0], height: upDim[1], scale: upScale }); } catch (e) { return; }
+  if (seq !== upSeq) return;            // a newer scale/model/limit change already redrew this
+  upChk = c;
   $("upEst").className = "small " + (c.ok ? "muted" : "warn");
-  $("upEst").innerHTML = c.ok
-    ? `Result ${c.out_width}×${c.out_height} (${c.megapixels} MP), about ${c.memory_gb} GB of the ${c.memory_limit_gb} GB limit${upScale >= 8 ? " · 2 passes" : ""}.`
-    : `⚠ ${esc(c.reason)}.<br>Upscale will first shrink the picture to ${c.fit_width}×${c.fit_height}, giving ${c.fit_width * upScale}×${c.fit_height * upScale}.`;
+  $("upEst").innerHTML = c.ok ? (c.full_on_desktop ? `Full size ${c.out_width}×${c.out_height} (${c.megapixels} MP) is saved on the desktop; about ${c.memory_gb} GB of the ${c.memory_limit_gb} GB limit${c.scale >= 8 ? " · 2 passes" : ""}.`
+                                     : `⚠ ${esc(c.full_note)}.`) + (c.capped ? ` Phone gets ${c.final_width}×${c.final_height}.` : "")
+                              : `⚠ ${esc(c.reason)}. Pick a smaller scale.`;
 }
+["upModel", "upDev", "upFmt"].forEach(id => $(id).addEventListener("change", upEstimate));
 $("upGo").onclick = async () => {
-  if (!upSrc) return alert("Pick a photo first.");
+  if (!upSrc) return notice("Pick a photo first.");
   const p = upPlan();
-  if (p && p.already) return alert("This picture is already at or above your screen size. Turn off 'Limit to my screen' to upscale it anyway.");
-  const sc = p && p.limited ? p.scale : upScale; let max = Math.max(...upDim);
-  if (upChk && !upChk.ok) {
-    if (!confirm(`${upChk.reason}.\n\nShrink the picture to ${upChk.fit_width}×${upChk.fit_height} first? (result ${upChk.fit_width * sc}×${upChk.fit_height * sc})`)) return;
-    max = Math.max(upChk.fit_width, upChk.fit_height);
-  }
+  if (p.already) return notice("This picture is already at or above your screen size. Turn off 'Limit to my screen' to upscale it anyway.");
+  if (upChk && !upChk.ok) return notice(upChk.reason + ". Pick a smaller scale.");
+  const sc = upScale, fin = p.w !== upDim[0] * sc || p.h !== upDim[1] * sc;
   $("upOut").innerHTML = "";
-  const r = await runJob(async () => { const im = await shrink(upSrc, max, "image/png");
+  const r = await runJob(async () => { const im = await shrink(upSrc, Math.max(...upDim), "image/png");
       const b = { type: "upscale", image: im.b64, scale: sc, model: $("upModel").value, device: $("upDev").value, format: $("upFmt").value };
-      if (p && p.limited) { b.max_w = p.w; b.max_h = p.h; }
+      if (fin) { b.max_w = p.w; b.max_h = p.h; }
       return b; },
-    $("upJob"), `Upscale ${sc}×` + (p && p.limited ? ` → ${p.w}×${p.h} (screen)` : ""), { btn: $("upGo"), done: (r, s) => `Done in ${s} s on ${r.device || "?"} → ${r.width}×${r.height} ${r.format || ""}${r.image ? " (" + fmtMB(r.image.length * 0.75) + ")" : ""}` });
+    $("upJob"), `Upscale ${sc}× → ${p.w}×${p.h}` + (p.limited ? " (screen)" : p.capped ? " (phone max)" : ""),
+    { btn: $("upGo"), done: (r, s) => `Done in ${s} s on ${r.device || "?"} → ${r.width}×${r.height} ${r.format || ""}${r.image ? " (" + fmtMB(r.image.length * 0.75) + ")" : ""}${r.ran_scale && r.ran_scale !== sc ? ` · ran ${r.ran_scale}×` : ""}` });
   if (r) {
     const ext = r.format === "JPEG" ? "jpg" : "png";
     showResult($("upOut"), r, "npustudio-upscale", `· ${r.width}×${r.height} ${r.format || ""}`);
-    $("upOut").querySelectorAll("button").forEach(b => { const f = b.onclick; b.onclick = () => (b.classList.contains("sv") ? saveImg : shareImg)(r.image, `npustudio-upscale-${sc}x-${Date.now()}.${ext}`); });
+    $("upOut").querySelectorAll("button").forEach(b => { b.onclick = () => (b.classList.contains("sv") ? saveImg : shareImg)(r.image, `npustudio-upscale-${sc}x-${Date.now()}.${ext}`); });
   }
 };
 
@@ -425,7 +442,7 @@ async function connPage() {
     : (Shell ? "Install the new NpuStudio-Companion.apk to save a home and a remote address and switch between them." : "In a browser, open this page at the address you want to use.");
 }
 $("conn").onclick = () => { document.querySelectorAll("#tabs button").forEach(x => x.classList.remove("on")); document.querySelectorAll("main .page").forEach(p => p.classList.toggle("hidden", p.id !== "tab-conn")); clearInterval(monTimer); connPage(); };
-$("cSave").onclick = () => { const r = Shell.setConnection($("cHome").value.trim(), $("cRemote").value.trim(), $("cMode").value); if (r) alert(r); };
+$("cSave").onclick = () => { const r = Shell.setConnection($("cHome").value.trim(), $("cRemote").value.trim(), $("cMode").value); if (r) notice(r); };
 $("cRepair").onclick = () => Shell.rePair();
 $("cTest").onclick = () => { $("connNote").textContent = "Testing…"; const id = "c" + (++cbSeq);
   cbs[id] = d => { const r = JSON.parse(d || "{}"); $("connNote").textContent = Object.entries(r).map(([k, v]) => `${k}: ${v == null ? "unreachable" : v + " ms"}`).join("   ·   ") || "Nothing saved."; };
@@ -465,7 +482,7 @@ async function desk() {
   } catch (e) { $("deskBox").innerHTML = `<p class="err">${esc(e.message)}</p>`; }
 }
 $("deskRe").onclick = desk;
-$("unpair").onclick = () => { if (!confirm("Forget the pairing key?")) return; localStorage.removeItem("npuKey"); if (Shell && Shell.unpair) Shell.unpair(); else location.reload(); };
+$("unpair").onclick = async () => { if (!(await ask("Forget the pairing key?"))) return; localStorage.removeItem("npuKey"); if (Shell && Shell.unpair) Shell.unpair(); else location.reload(); };
 
 // ---------- start ----------
 async function start() {
@@ -474,7 +491,7 @@ async function start() {
   try {
     await ping(); connPill(true); loadOptions().then(genPlan);
     $("pair").classList.add("hidden"); $("main").classList.remove("hidden"); $("tabs").classList.remove("hidden");
-    try { const v = await (await fetch("version.json", { cache: "no-store" })).json(); if (Shell && v.min_shell > shellVersion) alert("Please update the NpuStudio Companion app (this UI needs shell v" + v.min_shell + ")."); } catch (e) {}
+    try { const v = await (await fetch("version.json", { cache: "no-store" })).json(); if (Shell && v.min_shell > shellVersion) notice("Please update the NpuStudio Companion app (this UI needs shell v" + v.min_shell + ")."); } catch (e) {}
     if (window.__startTab) { const b = document.querySelector(`#tabs button[data-t="${window.__startTab}"]`); if (b) b.click(); }
     if (!Shell && window.Notification && Notification.permission === "default") Notification.requestPermission();
   } catch (e) {

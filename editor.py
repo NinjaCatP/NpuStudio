@@ -230,6 +230,7 @@ def build_edit_tab(root, nb, send_to_upscale=None, dnd=None, upscale=None):
         im = final()
         if im is None: return
         p = filedialog.asksaveasfilename(defaultextension=".png", filetypes=[("PNG (keeps transparency)", "*.png"), ("JPEG", "*.jpg")])
+        import outputs; outputs.autosave(im, "edit", "final")
         if not p: return
         try:
             if p.lower().endswith((".jpg", ".jpeg")): im.convert("RGB").save(p, quality=95)
@@ -320,6 +321,7 @@ def build_edit_tab(root, nb, send_to_upscale=None, dnd=None, upscale=None):
             t = time.time()
             try:
                 res, dev = fn(im, mask)
+                import outputs; outputs.autosave(res, "edit", name)
                 dt = time.time() - t; logging.info("edit %s %.1fs on %s", name, dt, dev)
                 ui(lambda: (push(res, f"{name} done in {dt:.1f}s on {dev if isinstance(dev, str) else 'UNet ' + dev[1]}"),))
             except Exception as e:
@@ -481,6 +483,7 @@ def build_edit_tab(root, nb, send_to_upscale=None, dnd=None, upscale=None):
                         res, dev, how, p = c.edit_masked(ai, im, mask, instr, analysis, strength=max(0.5, strength), progress=prog, status=wset, upscaler=upscale, method=methv.get())
                     else:
                         res, dev, how, p = c.edit_whole(im, instr, analysis, strength=min(strength, 0.6), progress=prog, status=wset, upscaler=upscale)
+                    import outputs; outputs.autosave(res, "aichange", instr)
                     dt = time.time() - t; dv = dev if isinstance(dev, str) else "/".join(dict.fromkeys(dev))
                     logging.info("AI change '%s' mode=%s how=%s dev=%s %.1fs prompt=%s", instr, mode, how, dv, dt, p)
                     def done():

@@ -67,12 +67,24 @@ def upscale_check(w, h, scale):
          "memory_gb": round(need / 2**30, 2), "memory_limit_gb": npustudio.MAX_BYTES / 2**30,
          "max_side": API_MAX_SIDE, "max_megapixels": API_MAX_MP, "ok": True, "reason": ""}
     if scale not in (2, 4, 8, 16): r.update(ok=False, reason="scale must be 2, 4, 8 or 16")
-    elif need > npustudio.MAX_BYTES: r.update(ok=False, reason=f"needs about {need/2**30:.1f} GB, over the {npustudio.MAX_BYTES/2**30:.0f} GB limit")
-    elif max(ow, oh) > API_MAX_SIDE or ow * oh > API_MAX_MP * 1e6:
-        r.update(ok=False, reason=f"result {ow}x{oh} is too big to send to a phone (max {API_MAX_SIDE}px side, {API_MAX_MP} MP)")
     f = min(1.0, API_MAX_SIDE / max(ow, oh), (API_MAX_MP * 1e6 / (ow * oh)) ** 0.5)   # input size that would fit
     r["fit_width"], r["fit_height"] = max(1, int(w * f)), max(1, int(h * f))
+    # Too big for a phone: upscale only as far as needed, then resize the result down to the phone max (not the source).
+    fw, fh, rs = phone_cap(w, h, scale)
+    r.update(final_width=fw, final_height=fh, run_scale=rs, capped=(fw, fh) != (ow, oh), full_on_desktop=need <= npustudio.MAX_BYTES)
+    if r["ok"] and not r["full_on_desktop"]:
+        r["full_note"] = f"full {ow}x{oh} needs about {need/2**30:.1f} GB, over the {npustudio.MAX_BYTES/2**30:.0f} GB memory limit - the desktop keeps the {rs}x result"
+        if npustudio.need_bytes(w, h, rs) > npustudio.MAX_BYTES: r.update(ok=False, reason=f"needs about {npustudio.need_bytes(w, h, rs)/2**30:.1f} GB, over the {npustudio.MAX_BYTES/2**30:.0f} GB limit")
+    if r["capped"]: r["note"] = f"{ow}x{oh} is over the phone max ({API_MAX_SIDE}px side, {API_MAX_MP} MP): runs {rs}x, then resizes to {fw}x{fh}"
     return r
+def im_size(im, s): return (im.size[0] * s, im.size[1] * s)
+def phone_cap(w, h, scale, mw=0, mh=0):
+    """-> (final w, final h, model scale to run). Caps at 16384 px side / 160 MP (and an optional max_w x max_h)."""
+    f = min(float(scale), API_MAX_SIDE / max(w, h), (API_MAX_MP * 1e6 / (w * h)) ** 0.5)
+    if mw > 0 and mh > 0: f = min(f, mw / w, mh / h)
+    rs = next((x for x in (2, 4, 8, 16) if x >= f - 1e-9 and x <= scale), scale)
+    fw, fh = (w * scale, h * scale) if f >= scale else (max(1, min(API_MAX_SIDE, round(w * f))), max(1, min(API_MAX_SIDE, round(h * f))))
+    return fw, fh, rs
 def ai():
     global _ai
     with _ai_lock:
@@ -219,6 +231,14 @@ def chat_engine(status):
         return _chat["eng"]
 
 class Cancelled(Exception): pass
+def save_out(im, kind, stat=None, tag=""):
+    """Full-size copy into the desktop outputs folder. Never fails the job."""
+    try:
+        import outputs
+        if stat and im.size[0] * im.size[1] > 24e6: stat(f"saving the full {im.size[0]}x{im.size[1]} on the desktop...")
+        return {"saved_path": outputs.save(im, kind, tag), "full_width": im.size[0], "full_height": im.size[1]}
+    except Cancelled: raise
+    except Exception as e: logging.exception("save output"); return {"save_error": str(e)}
 def api_job(kind, a, j):
     """Runs one JSON job. j = job dict (progress k/n, msg, text, confirm...). Returns result dict."""
     def prog(k, n):
@@ -233,27 +253,35 @@ def api_job(kind, a, j):
         im = cudaeng.gen(a["prompt"], w, h, int(a.get("steps", 4)), int(a.get("seed", 42)), prog, stat)
         upn = "Fast (Intel SR-1032)" if str(a.get("upscaler", "sharp")).lower() == "fast" else "Sharp (Real-ESRGAN x4plus)"
         if up > 1: stat(f"upscaling {up}x ({upn.split(' (')[0]})..."); im = upscaler(upn).upscale_to(im, up, prog)
-        return {"image": imgb64(imagegen.fit_crop(im, tw, th)), "device": "NVIDIA"}
+        im = imagegen.fit_crop(im, tw, th); return {"image": imgb64(im), "device": "NVIDIA", **save_out(im, "gen", stat, a.get("prompt", ""))}
     if kind == "upscale":
         name = "Sharp (Real-ESRGAN x4plus)" if a.get("model", "sharp") == "sharp" else "Fast (Intel SR-1032)"
-        src = b64img(a["image"]).convert("RGB"); sc = int(a.get("scale", 4)); chk = upscale_check(*src.size, sc)
-        if not chk["ok"]: raise ValueError(f"Upscale {sc}x of {src.size[0]}x{src.size[1]}: {chk['reason']}. "
-                                           f"Shrink the picture to {chk['fit_width']}x{chk['fit_height']} or pick a smaller scale.")
+        src = b64img(a["image"]).convert("RGB"); sc = int(a.get("scale", 4))
+        chk = upscale_check(*src.size, sc)
+        if not chk["ok"]: raise ValueError(f"Upscale {sc}x of {src.size[0]}x{src.size[1]}: {chk['reason']}. Pick a smaller scale.")
+        mw, mh = int(a.get("max_w") or 0), int(a.get("max_h") or 0)
+        fw, fh, rs = phone_cap(*src.size, sc, mw, mh)
+        import npustudio; need = npustudio.need_bytes(*src.size, sc); full = need <= npustudio.MAX_BYTES; why = ""
+        if full: rs = sc               # always make the full size for the desktop outputs folder, then cap what goes to the phone
+        else: why = (f"full {sc}x ({src.size[0] * sc}x{src.size[1] * sc}) needs {need / 2**30:.1f} GB, over the "
+                     f"{npustudio.MAX_BYTES / 2**30:.0f} GB memory limit; saved the {rs}x result instead")
         dev = a.get("device") or "Auto"
         if dev not in UP_DEVICES: raise ValueError("device must be one of " + ", ".join(UP_DEVICES))
-        u = upscaler(name, dev); stat(f"Upscaling {sc}x on {u.device}" + (" (2 passes)" if sc >= 8 else "") + "...")
-        im = u.upscale_to(src, sc, prog); del src
-        mw, mh = int(a.get("max_w") or 0), int(a.get("max_h") or 0)
-        if mw > 0 and mh > 0 and (im.size[0] > mw or im.size[1] > mh):     # phone "Limit to my screen": send a smaller result
-            from PIL import Image; f = min(mw / im.size[0], mh / im.size[1]); stat("fitting to your screen...")
-            im = im.resize((max(1, round(im.size[0] * f)), max(1, round(im.size[1] * f))), Image.LANCZOS)
+        u = upscaler(name, dev); stat(f"Upscaling {rs}x on {u.device}" + (" (2 passes)" if rs >= 8 else "") + (f", then resizing to {fw}x{fh}" if (fw, fh) != im_size(src, rs) else "") + "...")
+        im = u.upscale_to(src, rs, prog); del src
+        sv = save_out(im, "upscale", stat, f"{rs}x {name.split(' (')[0]}")
+        if why: sv["full_note"] = why
+        if im.size != (fw, fh):        # phone max / "Limit to my screen": send a smaller result
+            from PIL import Image; stat(f"resizing to {fw}x{fh}...")
+            im = im.resize((fw, fh), Image.LANCZOS)
         fmt = a.get("format", "AUTO").upper()
         if fmt == "AUTO": fmt = "PNG" if im.size[0] * im.size[1] <= 24e6 else "JPEG"     # big PNGs are huge to send
-        stat("encoding result..."); return {"image": imgb64(im, fmt), "format": fmt, "width": im.size[0], "height": im.size[1], "device": u.device}
+        stat("encoding result..."); return {"image": imgb64(im, fmt), "format": fmt, "width": im.size[0], "height": im.size[1], "device": u.device,
+                "ran_scale": rs, **sv}
     if kind in ("remove_bg", "erase"):
         im = b64img(a["image"])
         r, d = ai().remove_bg(im, stat) if kind == "remove_bg" else ai().erase(im, b64img(a["mask"]).convert("L").resize(im.size), stat)
-        return {"image": imgb64(r), "device": str(d)}
+        return {"image": imgb64(r), "device": str(d), **save_out(r, "edit", stat, kind.replace("_", "-"))}
     if kind == "change":     # AI Change: free-text instruction, optional mask (white = area to change)
         import aichange
         if _chg["c"] is None: _chg["c"] = aichange.Changer()
@@ -278,7 +306,7 @@ def api_job(kind, a, j):
                 raise ValueError("Couldn't find what to change. Name the thing (e.g. 'change outfit to a red dress'), paint it with the brush, "
                                  "or tick 'Whole picture' for a whole-picture change. Nothing was changed.")
             st_ = float(a.get("strength", 0.4)); r = c.edit_whole(im, instr, ana, strength=max(0.2, min(0.6, st_)), progress=prog, status=stat)
-        return {"image": imgb64(r[0]), "device": ", ".join(r[1]) if isinstance(r[1], (tuple, list)) else str(r[1]), "method": r[2], "prompt": r[3], "analysis": ana}
+        return {"image": imgb64(r[0]), **save_out(r[0], "aichange", stat, instr), "device": ", ".join(r[1]) if isinstance(r[1], (tuple, list)) else str(r[1]), "method": r[2], "prompt": r[3], "analysis": ana}
     if kind == "chat":       # allowlisted PC actions run on THIS PC; a CONFIRM action waits for POST .../confirm
         eng = chat_engine(stat); out = []
         def on_text(t): out.append(t); j["text"] = "".join(out)

@@ -672,6 +672,8 @@ def gui():
                 out = up.upscale_to(st["img"], sc, prog)
                 if dn.get(): out = denoise(out)
                 st["out"] = out
+                root.after(0, lambda: status.set(f"Saving {out.size[0]}x{out.size[1]} to the output folder..."))
+                import outputs; outputs.autosave(out, "upscale", f"{sc}x-{up.name.split(' (')[0]}")
                 root.after(0, lambda: (show(lb, out), zv.win is not None and zv.open(st["img"], out), status.set(f"Done {sc}x with {up.name.split(' (')[0]} on {up.device} in {time.time()-t:.1f}s -> {out.size[0]}x{out.size[1]}")))
                 logging.info("upscale %sx %s %s %.1fs", sc, up.name, out.size, time.time() - t)
             except MemoryError:
@@ -878,6 +880,17 @@ def gui():
     rm_.add_command(label="Restart NpuStudio", command=do_restart)
     if remote.role() != "laptop": rm_.add_command(label="Restart NpuStudio + NpuStudio-Server", command=lambda: do_restart(server_too=True))
     rstm.pack(side="right", padx=4)
+    import outputs
+    def pick_outputs():
+        from tkinter import filedialog
+        d = filedialog.askdirectory(parent=root, title="Folder for full-size results (phone jobs)", initialdir=outputs.folder())
+        if d: outputs.set_folder(d); messagebox.showinfo("Output folder", f"Full-size results will be saved in:\n{outputs.folder()}", parent=root)
+    outm = tk.Menubutton(topbar, text="\U0001F4C1 Output", relief="raised", padx=8)
+    om_ = tk.Menu(outm, tearoff=0); outm["menu"] = om_
+    om_.add_command(label="Open output folder", command=outputs.open_folder)
+    om_.add_command(label="Change output folder...", command=pick_outputs)
+    om_.add_command(label="Reset to default (NpuStudio\\outputs)", command=lambda: outputs.set_folder(""))
+    outm.pack(side="right", padx=4)
     if "--autorestart" in sys.argv: root.after(6000, lambda: do_restart(force=True))
     ttk.Button(topbar, text="Pair phone", command=lambda: open_pair_window(root)).pack(side="right", padx=4)
     import devices
