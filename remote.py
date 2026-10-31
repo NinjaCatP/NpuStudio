@@ -61,6 +61,26 @@ def call(fn, *args, progress=None, status=None, **kw):
     return wire.unpack(data)
 
 _patched = [False]
+def start_reporter(name="Laptop"):
+    """Push this PC's Chip Monitor numbers to the desktop every 3 s so the phone app's Monitor tab can show the laptop."""
+    if os.environ.get("NPU_SERVER") or _rep[0]: return
+    _rep[0] = True
+    def loop():
+        cc = None
+        while True:
+            time.sleep(3)
+            if not configured() or health() is None: continue
+            try:
+                if cc is None:
+                    import chipmon; cc = chipmon.ChipCounter()
+                body = json.dumps({"name": name, "chips": cc.read()}, default=str).encode()
+                r = urllib.request.Request(_url("api/v1/report"), data=body, method="POST",
+                                           headers={"X-Key": cfg().get("key", ""), "Content-Type": "application/json"})
+                urllib.request.urlopen(r, timeout=3).read()
+            except Exception as e: logging.debug("report: %s", e)
+    threading.Thread(target=loop, daemon=True, name="remote-report").start()
+_rep = [False]
+
 def install():
     """Route the CUDA diffusion engines (AI Change redraw/pose/recolor, Image Gen) to the desktop while a remote Device is
     picked. Wraps cudaeng's functions at run time (cudaeng.py itself is unchanged); falls back to local when offline."""
@@ -78,3 +98,4 @@ def install():
         setattr(cudaeng, name, wrap)
     oa = cudaeng.available; cudaeng.available = lambda: active() or oa()
     _patched[0] = True
+    start_reporter()

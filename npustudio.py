@@ -636,7 +636,8 @@ def gui():
             w = mon["win"]; w.deiconify(); w.lift(); w.focus_force(); return
         w = tk.Toplevel(root); w.title("NpuStudio - Chip Monitor"); mon["win"] = w; w.resizable(True, True)
         w.geometry(f"{int(sw*0.42)}x{int(sh*0.7)}+{int(sw*0.29)}+{int(sh*0.12)}")
-        COL = {"NPU": ("#a970ff", "#2e1f4a"), "Intel Arc": ("#87cefa", "#1d3a4d"), "NVIDIA": ("#76b900", "#253a00")}
+        COL = {"NPU": ("#a970ff", "#2e1f4a"), "Intel Arc": ("#87cefa", "#1d3a4d"), "NVIDIA": ("#76b900", "#253a00"),
+               "Desktop PC": ("#ff9f1a", "#4a2e05")}
         top = tk.StringVar(master=w, value="Starting..."); ttk.Label(w, textvariable=top, foreground="#555").pack(anchor="w", padx=10, pady=(6, 0))
         if mon["cnt"] is None:
             try:
@@ -644,27 +645,35 @@ def gui():
             except Exception as e: logging.exception("counter"); top.set(f"Counter error: {e}")
         cnt = mon["cnt"]; panes = {}
         chips = [c for c in ("NPU", "Intel Arc", "NVIDIA") if cnt and c in cnt.luids]
-        if cnt and not chips: top.set("No NPU/GPU found in performance counters")
+        if remote.configured(): chips.append("Desktop PC")
+        if not chips: top.set("No NPU/GPU found in performance counters")
+        # scrollable column of equal-height panels (fits the window; scrolls when it's made small)
+        outer = tk.Frame(w, bg="#111"); outer.pack(fill="both", expand=True)
+        scv = tk.Canvas(outer, bg="#111", highlightthickness=0); sb = ttk.Scrollbar(outer, orient="vertical", command=scv.yview)
+        scv.configure(yscrollcommand=sb.set); sb.pack(side="right", fill="y"); scv.pack(side="left", fill="both", expand=True)
+        body = tk.Frame(scv, bg="#111"); bid = scv.create_window(0, 0, window=body, anchor="nw")
+        PH = 110   # min panel height incl. text
+        def relayout(e=None):
+            W, H = scv.winfo_width(), scv.winfo_height(); n = max(len(panes), 1)
+            ph = max(PH, H // n); scv.itemconfigure(bid, width=W, height=ph * n); scv.configure(scrollregion=(0, 0, W, ph * n))
+        scv.bind("<Configure>", relayout)
+        w.bind("<MouseWheel>", lambda e: scv.yview_scroll(int(-e.delta / 120), "units") if scv.winfo_height() < body.winfo_height() else None)
         for c in chips:
-            f = ttk.Frame(w); f.pack(fill="both", expand=True, padx=10, pady=4)
+            f = tk.Frame(body, bg="#111"); f.pack(fill="both", expand=True, padx=10, pady=4)
             v = tk.StringVar(master=w, value=c); tk.Label(f, textvariable=v, fg=COL[c][0], bg="#111", anchor="w", justify="left", font=("Segoe UI", 11, "bold")).pack(fill="x")
-            cv = tk.Canvas(f, bg="#111", highlightthickness=0, height=80); cv.pack(fill="both", expand=True)
+            cv = tk.Canvas(f, bg="#111", highlightthickness=0, height=60); cv.pack(fill="both", expand=True)
             panes[c] = (v, cv, [0.0] * 120)
-        dsk = tk.StringVar(master=w, value=""); tk.Label(w, textvariable=dsk, fg="#76b900", bg="#111", anchor="w", justify="left", font=("Segoe UI", 11, "bold")).pack(fill="x", padx=10, pady=4)
-        def dpoll():
-            if not w.winfo_exists(): return
-            def q():
-                if not remote.configured(): t = ""
-                else:
-                    i = remote.health(max_age=1.5)
-                    if not i: t = "Desktop PC: offline"
-                    else:
-                        DEG = "{}\u00b0C"; g = lambda k, f="{}": f.format(i[k]) if i.get(k) is not None else "N/A"
-                        t = (f"Desktop PC ({i.get('gpu', 'N/A')}): {g('use', '{}%')}   memory {g('vram_used', '{:,} MB')} / {g('vram_total', '{:,} MB')}\n"
-                             f"power {g('watts', '{} W')}   temp {g('temp', DEG)}   jobs running {i.get('busy', 0)}")
-                root.after(0, dsk.set, t)
-            threading.Thread(target=q, daemon=True).start(); w.after(2000, dpoll)
-        dpoll()
+        dstate = {"i": None, "busy": False}
+        def dq():   # desktop health in the background (never blocks the UI)
+            try: dstate["i"] = remote.health(max_age=0.9)
+            except Exception: dstate["i"] = None
+            finally: dstate["busy"] = False
+        def draw(c, cv, hist):
+            W, H = max(cv.winfo_width(), 2), max(cv.winfo_height(), 2); cv.delete("all")
+            for i in range(1, 4): cv.create_line(0, H * i / 4, W, H * i / 4, fill="#333")
+            pts = []
+            for i, x in enumerate(hist): pts += [W * i / (len(hist) - 1), H - H * x / 100]
+            cv.create_polygon([0, H] + pts + [W, H], fill=COL[c][1], outline=""); cv.create_line(pts, fill=COL[c][0], width=2)
         if cnt: top.set("Updates every second. Power from real counters only: " + (", ".join(cnt.energy_instances()) or "no Energy Meter counters"))
         def tick():
             if not w.winfo_exists(): return
@@ -672,19 +681,28 @@ def gui():
             except Exception: logging.exception("tick"); data = {}
             if cnt and data.get("_package") is not None:
                 top.set(f"CPU package power: {data['_package']:.1f} W (whole processor package, RAPL)   |   updates every second")
+            if "Desktop PC" in panes and not dstate["busy"]:
+                dstate["busy"] = True; threading.Thread(target=dq, daemon=True).start()
             for c, (v, cv, hist) in panes.items():
-
+                if c == "Desktop PC":
+                    i = dstate["i"]
+                    if not i:
+                        hist.append(0.0); del hist[0]; v.set("Desktop PC: offline\n ")
+                    else:
+                        DEG = "{}\u00b0C"; g = lambda k, f="{}": f.format(i[k]) if i.get(k) not in (None, "N/A") else "N/A"
+                        try: u = float(i.get("use") or 0)
+                        except Exception: u = 0.0
+                        hist.append(u); del hist[0]
+                        v.set(f"Desktop PC ({i.get('gpu', 'N/A')}):  {g('use', '{}%')}   memory {g('vram_used', '{:,} MB')} / {g('vram_total', '{:,} MB')}\n"
+                              f"power {g('watts', '{} W')}   temp {g('temp', DEG)}   jobs running {i.get('busy', 0)}")
+                    draw(c, cv, hist); continue
                 d = data.get(c)
                 if not d: continue
                 hist.append(d["use"]); del hist[0]
                 pw = f"{d['watts']:.1f} W ({d['wnote']})" if d["watts"] is not None else "N/A"
                 tmp = f"   temp {d['temp']}\u00b0C" if d.get("temp") is not None else "   temp N/A"
                 v.set(f"{c}:  {d['use']:5.1f}%   memory {d['ded']:,.0f} MB dedicated / {d['shared']:,.0f} MB shared\npower {pw}{tmp}")
-                W, H = max(cv.winfo_width(), 2), max(cv.winfo_height(), 2); cv.delete("all")
-                for i in range(1, 4): cv.create_line(0, H * i / 4, W, H * i / 4, fill="#333")
-                pts = []
-                for i, x in enumerate(hist): pts += [W * i / (len(hist) - 1), H - H * x / 100]
-                cv.create_polygon([0, H] + pts + [W, H], fill=COL[c][1], outline=""); cv.create_line(pts, fill=COL[c][0], width=2)
+                draw(c, cv, hist)
             mon["job"] = root.after(1000, tick)
         def close():
             if mon["job"]: root.after_cancel(mon["job"]); mon["job"] = None

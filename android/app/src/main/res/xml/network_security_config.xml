@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android can't express IP ranges here, so cleartext is allowed at this level and the app itself
+     refuses every host that isn't a private LAN, Tailscale (100.64.0.0/10) or *.ts.net address (HostRules.kt). -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true" />
+    <domain-config cleartextTrafficPermitted="true"><domain includeSubdomains="true">ts.net</domain></domain-config>
+</network-security-config>

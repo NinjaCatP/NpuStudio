@@ -97,6 +97,7 @@ class H(BaseHTTPRequestHandler):
         if isinstance(body, (dict, list)): body = json.dumps(body).encode(); ctype = "application/json"
         self.send_response(code); self.send_header("Content-Type", ctype); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
     def do_GET(self):
+        if self.path.split("?")[0].rstrip("/") == "/pair": return pair_page(self)
         if self.path.split("?")[0].rstrip("/") in ("/app", "") or self.path.startswith("/app/"):
             return serve_app(self)   # the mobile web UI holds no secrets; its API calls carry the key
         if not self._ok(): return self._send(403, {"error": "bad key"})
@@ -132,6 +133,27 @@ class H(BaseHTTPRequestHandler):
             finally: _busy[0] -= 1
         threading.Thread(target=work, daemon=True).start(); self._send(200, {"id": jid})
 
+# ================= pairing QR (only from this PC itself) =================
+def pair_page(h):
+    if h.client_address[0] not in ("127.0.0.1", "::1"):
+        return h._send(403, {"error": "open the pairing page on the desktop itself: http://127.0.0.1:%s/pair" % config()["port"]})
+    import html, urllib.parse
+    c = config(); hosts = [lan_ip()] + tailscale_ips(); port = c["port"]
+    cards = []
+    for host in hosts:
+        uri = "npustudio://pair?" + urllib.parse.urlencode({"host": host, "port": port, "key": c["key"]})
+        try:
+            import segno; svg = segno.make(uri, error="m").svg_inline(scale=6)
+        except Exception as e: svg = "<p>(QR needs the segno package: %s)</p>" % html.escape(str(e))
+        label = "Tailscale (anywhere)" if host.startswith("100.") else "Home Wi-Fi / LAN"
+        cards.append(f"<div class=c><h2>{label}</h2>{svg}<p><b>Address:</b> http://{host}:{port}</p></div>")
+    body = f"""<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width"><title>NpuStudio pairing</title>
+<style>body{{font-family:Segoe UI,sans-serif;background:#14161c;color:#e8e8ee;text-align:center}}.c{{display:inline-block;background:#fff;color:#111;border-radius:12px;padding:16px;margin:12px}}code{{background:#222;padding:4px 8px;border-radius:6px}}</style>
+<h1>Pair the NpuStudio Companion app</h1><p>In the phone app, tap <b>Scan QR</b> and point it at one of these codes.</p>{''.join(cards)}
+<p>Or type the address above and this key: <code>{html.escape(c['key'])}</code></p><p>Keep this key private. To change it, delete models\\remote_server.json and restart the server.</p>"""
+    h.send_response(200); h.send_header("Content-Type", "text/html; charset=utf-8"); h.send_header("Cache-Control", "no-store")
+    b = body.encode(); h.send_header("Content-Length", str(len(b))); h.end_headers(); h.wfile.write(b)
+
 # ================= mobile web UI (/app) =================
 WEB = os.path.join(APP, "webapp")
 MIME = {".html": "text/html; charset=utf-8", ".js": "text/javascript", ".css": "text/css", ".json": "application/json",
@@ -160,10 +182,15 @@ def chat_engine(status):
             import npustudio; _chat["eng"] = npustudio.ChatEngine(status)
         return _chat["eng"]
 
+class Cancelled(Exception): pass
 def api_job(kind, a, j):
     """Runs one JSON job. j = job dict (progress k/n, msg, text, confirm...). Returns result dict."""
-    def prog(k, n): j["k"], j["n"] = k, n
-    def stat(m): j["msg"] = str(m)
+    def prog(k, n):
+        if j.get("cancel"): raise Cancelled("cancelled")
+        j["k"], j["n"] = k, n
+    def stat(m):
+        if j.get("cancel"): raise Cancelled("cancelled")
+        j["msg"] = str(m)
     if kind == "gen":
         import imagegen, cudaeng
         tw, th = int(a.get("width", 768)), int(a.get("height", 768)); (w, h), up = imagegen.plan_for(tw, th)
@@ -191,7 +218,7 @@ def api_job(kind, a, j):
         if mask is not None and mask.getbbox():
             r = c.edit_masked(ai(), im, mask, instr, ana, progress=prog, status=stat, method=a.get("method", "Auto"))
         else: r = c.edit_whole(im, instr, ana, progress=prog, status=stat)
-        return {"image": imgb64(r[0]), "device": str(r[1]), "method": r[2], "prompt": r[3], "analysis": ana}
+        return {"image": imgb64(r[0]), "device": ", ".join(r[1]) if isinstance(r[1], (tuple, list)) else str(r[1]), "method": r[2], "prompt": r[3], "analysis": ana}
     if kind == "chat":       # allowlisted PC actions run on THIS PC; a CONFIRM action waits for POST .../confirm
         eng = chat_engine(stat); out = []
         def on_text(t): out.append(t); j["text"] = "".join(out)
@@ -203,8 +230,9 @@ def api_job(kind, a, j):
         return {"text": j.get("text", ""), "action": str(act) if act else None, "action_result": res, "device": eng.device}
     raise ValueError("unknown job type " + kind)
 
+REPORTS = {}
 def monitor():
-    d = {"desktop": gpu_info()}
+    d = {"desktop": gpu_info(), "others": {k: v for k, v in REPORTS.items() if time.time() - v["_t"] < 10}}
     try:
         if _mon["c"] is None:
             import chipmon; _mon["c"] = chipmon.ChipCounter()
@@ -214,6 +242,12 @@ def monitor():
 
 def api_get(h, p):
     if p == ["health"]: return h._send(200, gpu_info())
+    if p == ["info"]:
+        c = config(); v = {}
+        try: v = json.load(open(os.path.join(WEB, "version.json")))
+        except Exception: pass
+        return h._send(200, {"name": socket.gethostname(), "port": c["port"], "lan": lan_ip(), "tailscale": tailscale_ips(),
+                             "ui": v, "busy": _busy[0], "jobs": [{"id": k, "type": x.get("type"), "state": x["state"]} for k, x in JOBS.items() if x.get("type")]})
     if p == ["monitor"]: return h._send(200, monitor())
     if len(p) >= 2 and p[0] == "jobs":
         j = JOBS.get(p[1])
@@ -221,6 +255,7 @@ def api_get(h, p):
         if len(p) == 3 and p[2] == "result":
             if j["state"] in ("running", "confirm"): return h._send(409, {"error": "not done"})
             JOBS.pop(p[1], None)
+            if j["state"] == "cancelled": return h._send(410, {"error": "cancelled"})
             return h._send(500 if j["state"] == "error" else 200, {"error": j["err"]} if j["state"] == "error" else j["res"])
         return h._send(200, {"id": p[1], "type": j.get("type"), "state": j["state"], "progress": j["k"], "total": j["n"],
                              "message": j["msg"], "text": j.get("text", ""), "confirm": j.get("confirm")})
@@ -232,6 +267,14 @@ def api_post(h, p, data):
     if p == ["chat", "new"]:
         if _chat["eng"]: _chat["eng"].new_chat()
         return h._send(200, {"ok": True})
+    if len(p) == 3 and p[0] == "jobs" and p[2] == "cancel":
+        j = JOBS.get(p[1])
+        if not j: return h._send(404, {"error": "no such job"})
+        j["cancel"] = True
+        if j["state"] == "confirm": j["answer"] = False; j["ev"].set()
+        return h._send(200, {"ok": True})
+    if p == ["report"]:      # the laptop app pushes its Chip Monitor numbers here so the phone can show them
+        a["_t"] = time.time(); REPORTS[str(a.get("name", "laptop"))[:40]] = a; return h._send(200, {"ok": True})
     if len(p) == 3 and p[0] == "jobs" and p[2] == "confirm":
         j = JOBS.get(p[1])
         if not j or j["state"] != "confirm": return h._send(409, {"error": "job is not waiting for a confirm"})
@@ -242,18 +285,21 @@ def api_post(h, p, data):
         def work():
             _busy[0] += 1; t = time.time()
             try: j["res"] = api_job(kind, a, j); j["res"]["seconds"] = round(time.time() - t, 2); j["state"] = "done"
-            except Exception as e: logging.exception("api job %s", kind); j["err"] = f"{type(e).__name__}: {e}"; j["state"] = "error"
+            except Cancelled: j["err"] = "cancelled"; j["state"] = "cancelled"
+            except Exception as e:
+                if j.get("cancel"): j["err"] = "cancelled"; j["state"] = "cancelled"
+                else: logging.exception("api job %s", kind); j["err"] = f"{type(e).__name__}: {e}"; j["state"] = "error"
             finally: _busy[0] -= 1
         threading.Thread(target=work, daemon=True).start(); return h._send(200, {"id": jid})
     h._send(404, {"error": "not found"})
 
 if __name__ == "__main__":
-    c = config(); KEY = c["key"]; ips = [c.get("bind") or lan_ip()] + tailscale_ips()
+    c = config(); KEY = c["key"]; ips = [c.get("bind") or lan_ip()] + tailscale_ips() + ["127.0.0.1"]
     for ip in ips:
         srv = ThreadingHTTPServer((ip, int(c["port"])), H); threading.Thread(target=srv.serve_forever, daemon=True).start()
     ip = ", ".join(ips)
     logging.info("NpuStudio server listening on %s port %s (LAN + Tailscale only)", ip, c["port"])
-    print(f"NpuStudio desktop worker on {ip} port {c['port']}\nPairing key: {c['key']}\nOn the laptop: Device > Desktop PC, then enter this address and key once.\nClose this window to stop.", flush=True)
+    print(f"NpuStudio desktop worker on {ip} port {c['port']}\nPairing key: {c['key']}\nOn the laptop: Device > Desktop PC, then enter this address and key once.\nPhone pairing QR: run Show-PairingQR.bat (opens http://127.0.0.1:{c['port']}/pair).\nClose this window to stop.", flush=True)
     try:
         while True: time.sleep(3600)
     except KeyboardInterrupt: pass

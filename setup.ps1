@@ -17,7 +17,7 @@ $env:UV_CACHE_DIR = "$app\uvcache"
 Log 'Installing Python 3.11...'
 & $uv venv "$app\venv" --python 3.11 2>&1 | Tee-Object -FilePath $log -Append
 Log 'Installing packages (this takes a few minutes)...'
-& $uv pip install --python "$app\venv\Scripts\python.exe" openvino==2026.4.1 openvino-genai==2026.4.1.0 openvino-tokenizers==2026.4.1.0 huggingface_hub pycaw comtypes pillow numpy pywin32 tkinterdnd2 2>&1 | Tee-Object -FilePath $log -Append
+& $uv pip install --python "$app\venv\Scripts\python.exe" openvino==2026.4.1 openvino-genai==2026.4.1.0 openvino-tokenizers==2026.4.1.0 huggingface_hub pycaw comtypes pillow numpy pywin32 tkinterdnd2 segno 2>&1 | Tee-Object -FilePath $log -Append
 # NVIDIA GPU support (InstructPix2Pix, SD inpaint, Image Gen, Sharp upscale on CUDA): torch CUDA 12.8 (~2.6 GB download,
 # ~4.5 GB installed) + diffusers. Skipped when no NVIDIA GPU is present - the app then uses NPU / Intel Arc / CPU only.
 if (Get-CimInstance Win32_VideoController | Where-Object { $_.Name -match 'NVIDIA' }) {

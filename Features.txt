@@ -184,4 +184,14 @@ DESKTOP PC LINK (laptop + desktop working together)
 - Top bar shows "Desktop PC: online/offline"; the Chip Monitor shows the desktop GPU's use, memory, power and temperature (N/A when unreadable).
 - On the desktop: NpuStudio-Server.bat starts the worker (home network + Tailscale only, pairing key required). AllowLaptop-Firewall.ps1 adds a private-network-only firewall rule.
 - API.md documents the worker API for other apps (phone app): health, chip monitor, image gen, upscale, edit / AI Change, background removal, erase, and chat with PC actions (Yes/No confirm on the remote side).
+
+- Chip Monitor: the desktop has its own orange usage graph panel (GPU use, memory, power, temp, jobs running), the same as the laptop's chips; it shows 'offline' with a flat line when the desktop can't be reached. The panels scroll when the window is small.
+
+ANDROID COMPANION APP (NpuStudio-Companion.apk)
+- A thin Android app that loads its screens from the desktop server (/app), so the app updates when the desktop updates.
+- Tabs: Chat (PC actions with Yes/No confirm), Image Gen (with phone-wallpaper sizes), Edit / AI Change and Remove background (from the gallery), Upscale, Monitor (desktop plus the laptop when it's open), and Desktop status.
+- Every job shows progress and has Cancel. Results can be saved to Pictures/NpuStudio or shared. You get a notification when a long job finishes in the background.
+- Pairing: type the address and key, or scan the QR from Show-PairingQR.bat. If the desktop can't be reached, an offline screen offers Retry.
+- Only connects to home-network and Tailscale addresses. For use away from home, see TAILSCALE.md and AllowTailscale-Firewall.ps1.
+- The laptop app sends its chip stats to the desktop every 3 s while paired, so the phone can show them.
 - Models stay on each machine; only pictures and settings travel over the network.

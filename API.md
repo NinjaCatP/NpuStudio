@@ -9,7 +9,7 @@
 - **Auth:** every request needs the pairing key, sent as `X-Key: <key>` or `Authorization: Bearer <key>`. A wrong key returns `403`.
   - The key is created on first run and stored in `models\remote_server.json`, and the server window shows it.
   - To change the key, delete `models\remote_server.json` and restart the server.
-- **Firewall:** `AllowLaptop-Firewall.ps1` adds an inbound rule for this app's Python on TCP 47860, limited to the Private profile and the local subnet. For Tailscale access, allow the Tailscale interface too.
+- **Firewall:** `AllowLaptop-Firewall.ps1` adds an inbound rule for this app's Python on TCP 47860, limited to the Private profile and the local subnet. For Tailscale, run `AllowTailscale-Firewall.ps1` (TCP 47860 from 100.64.0.0/10 only).
 - **No code over the wire:** requests carry only JSON and images, never pickled objects.
 
 ## Conventions
@@ -89,18 +89,25 @@ $r = Invoke-RestMethod "$u/jobs/$id/result" -Headers $h; [IO.File]::WriteAllByte
 ## Laptop link (internal)
 The NpuStudio laptop app uses a compact binary form of the same jobs: `POST /job`, `GET /job/{id}`, `GET /job/{id}/result`, and `POST /call` for upscale tiles. These carry a JSON header plus PNG and .npy blobs (`wire.py`) and use the same key and network rules. They're internal and may change. Phone apps should use `/api/v1`.
 
-## Mobile web UI (`/app`), so the phone app updates from the desktop
-- **What's served:** the desktop hosts the phone UI as plain HTML/JS/CSS from the `webapp\` folder, at `http://<desktop>:47860/app/`.
-- **Versioning:** `webapp/version.json` holds `{ui_version, api, min_shell}`. Updating NpuStudio on the desktop updates the phone UI, so there's no app rebuild. Files are sent with `Cache-Control: no-cache`.
-- **Access:** `/app` needs no key, because it holds no secrets. It still has the same LAN/Tailscale-only caller rule. The page keeps the pairing key in `localStorage` and sends it on every `/api/v1` call.
-- **Android shell, a thin WebView:**
-  1. Pairing screen: enter the address and key (or scan a QR code later).
-  2. Load `/app/`.
-  3. Check `min_shell` against its own shell version, and ask the user to update the shell only if it's too old.
-- **JS bridge:** the shell injects `window.NpuShell`, with every call optional and feature-detected by the page:
-  - `pickImage()` → Promise<base64>, the gallery picker
-  - `share(base64, filename)`, the Android share sheet
-  - `download(base64, filename)`, which saves to Downloads or Pictures
-  - `notify(title, text)`, for example "Upscale done" while the app is in the background
-  - `shellVersion` (int)
-- **Status:** the current `index.html` is a stub that does pairing plus a health/GPU readout. The full UI comes later.
+## Cancel
+`POST /api/v1/jobs/{id}/cancel` stops a job at its next progress step. Its state becomes `cancelled`, and `.../result` returns `410`.
+
+## Other endpoints
+- `GET /api/v1/info`: `{name, port, lan, tailscale[], ui, busy, jobs[]}`, used by the Desktop tab.
+- `POST /api/v1/report`: the laptop app pushes its Chip Monitor numbers here every 3 s. `/monitor` lists them under `others` for 10 s.
+- `GET /pair`: the pairing QR page. It only opens on the desktop itself (`http://127.0.0.1:47860/pair`, or **Show-PairingQR.bat**). It needs the `segno` package.
+
+## Mobile web UI (`/app`) and the Android shell
+- **What's served:** `webapp/` (`index.html`, `app.js`, `app.css`, `version.json`) is served at `http://<desktop>:47860/app/` with `Cache-Control: no-cache`. Updating the desktop updates the phone, with no APK rebuild.
+- **Tabs:** Chat (with Yes/No confirms), Image Gen (including phone-wallpaper sizes), Edit/AI Change, Upscale, Monitor (desktop plus the laptop when it's online) and Desktop status. Every job shows progress and has a Cancel button.
+- **Versioning:** `version.json` holds `{ui_version, api, min_shell}`. If the shell is older than `min_shell`, the page asks the user to update the app.
+- **Key:** the shell opens `/app/#k=<key>`. The page saves the key in `localStorage`, removes it from the URL, and sends it as `X-Key` on every API call. `/app` itself needs no key, but it is LAN/Tailscale only.
+- **JS bridge (`window.NpuShell`, Android only, feature-detected):**
+  - `shellVersion()` → int
+  - `pickImage(cbId)` opens the gallery. The page receives `window.npuCallback(cbId, base64 | null)`.
+  - `saveImage(base64, name)` saves to Pictures/NpuStudio. `download` is an alias.
+  - `share(base64, name)` opens the Android share sheet.
+  - `notify(title, text)`: the page calls it when a job finishes while the app is in the background.
+  - `unpair()` forgets the pairing and shows the pairing screen.
+- **In a normal browser:** the same page works without the bridge. It falls back to a file input, a download link, the Web Share API and web notifications.
+- **Android source and build:** see `android/README.md`. For use away from home, see `TAILSCALE.md`.

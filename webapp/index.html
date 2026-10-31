@@ -1,24 +1,99 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>NpuStudio</title>
-<style>body{font-family:system-ui,sans-serif;background:#111;color:#eee;margin:0;padding:16px}h1{font-size:1.3em}
-.card{background:#1d1d1d;border-radius:12px;padding:12px;margin:10px 0}input,button{font-size:1em;padding:8px;border-radius:8px;border:0}
-button{background:#76b900;color:#111}#st{white-space:pre-line}</style></head>
-<body><h1>NpuStudio <small id="ver"></small></h1>
-<div class="card">Placeholder UI served by the desktop. The full mobile UI comes later.</div>
-<div class="card"><label>Pairing key <input id="key" type="password"></label> <button onclick="save()">Connect</button></div>
-<div class="card" id="st">Not connected.</div>
-<script>
-// Native shell bridge (Android WebView): window.NpuShell may provide pickImage(), share(b64,name), download(b64,name), notify(title,text)
-const API = location.origin + "/api/v1";
-const key = () => localStorage.getItem("npukey") || "";
-function save(){ localStorage.setItem("npukey", document.getElementById("key").value.trim()); poll(); }
-async function poll(){
-  try{ const r = await fetch(API + "/health", {headers:{"X-Key": key()}});
-    const d = await r.json(); document.getElementById("st").textContent = r.ok ?
-      `Desktop ${d.name} online\nGPU ${d.gpu}: ${d.use ?? "N/A"}%  ${d.watts ?? "N/A"} W  ${d.temp ?? "N/A"}°C` : "Wrong pairing key";
-  }catch(e){ document.getElementById("st").textContent = "Desktop offline"; }
-}
-fetch("version.json").then(r=>r.json()).then(v=>document.getElementById("ver").textContent="UI "+v.ui_version);
-document.getElementById("key").value = key(); if(key()) poll(); setInterval(()=>key()&&poll(), 5000);
-</script></body></html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#14161c">
+<title>NpuStudio Companion</title>
+<link rel="stylesheet" href="app.css">
+</head><body>
+<header><div class="brand"><span class="logo">N</span> NpuStudio</div><div id="conn" class="pill">…</div></header>
+
+<section id="pair" class="page hidden">
+  <h2>Pair with your desktop</h2>
+  <p class="muted">Enter the pairing key shown in the NpuStudio server window (or scan the QR in the Android app).</p>
+  <label>Pairing key<input id="pairKey" autocomplete="off" spellcheck="false"></label>
+  <button id="pairBtn" class="primary">Save</button>
+  <p id="pairMsg" class="err"></p>
+</section>
+
+<main id="main" class="hidden">
+<section id="tab-chat" class="page">
+  <div id="chatLog" class="chatlog"></div>
+  <div class="row chatbar">
+    <input id="chatIn" placeholder="Ask anything, or e.g. &quot;open notepad&quot;" enterkeyhint="send">
+    <button id="chatSend" class="primary">Send</button>
+  </div>
+  <div class="row"><button id="chatNew" class="ghost">New chat</button><span class="muted small">PC actions run on the desktop. Risky ones ask first.</span></div>
+</section>
+
+<section id="tab-gen" class="page hidden">
+  <label>Prompt<textarea id="genPrompt" rows="3" placeholder="a cozy cabin in snowy mountains at dusk"></textarea></label>
+  <label>Size<select id="genSize">
+    <optgroup label="Phone wallpaper">
+      <option value="1080x2400" selected>Phone 1080×2400 (most Android)</option>
+      <option value="1440x3200">Phone QHD+ 1440×3200</option>
+      <option value="1080x1920">Phone 1080×1920 (16:9)</option>
+      <option value="1170x2532">iPhone 1170×2532</option>
+      <option value="1290x2796">iPhone Pro Max 1290×2796</option>
+      <option value="device">This phone's screen</option>
+    </optgroup>
+    <optgroup label="General">
+      <option value="512x512">512×512</option>
+      <option value="768x768">768×768</option>
+      <option value="1024x1024">1024×1024</option>
+      <option value="768x512">768×512</option>
+      <option value="1920x1080">1920×1080 (desktop wallpaper)</option>
+      <option value="2560x1440">2560×1440</option>
+      <option value="3840x2160">3840×2160 (4K)</option>
+    </optgroup>
+  </select></label>
+  <div class="row">
+    <label class="grow">Steps<input id="genSteps" type="number" min="1" max="50" value="4"></label>
+    <label class="grow">Seed<input id="genSeed" type="number" value="42"></label>
+    <button id="genRand" class="ghost">🎲</button>
+  </div>
+  <button id="genGo" class="primary wide">Generate</button>
+  <div id="genJob"></div><div id="genOut" class="out"></div>
+</section>
+
+<section id="tab-edit" class="page hidden">
+  <button id="editPick" class="wide">📷 Pick a photo</button>
+  <img id="editIn" class="preview hidden" alt="">
+  <label>What should change?<input id="editInstr" placeholder="change the outfit to a red dress"></label>
+  <label>Method<select id="editMethod"><option>Auto</option><option>Redraw</option><option>Recolor</option></select></label>
+  <div class="row"><button id="editGo" class="primary grow">AI Change</button><button id="editBg" class="grow">Remove background</button></div>
+  <div id="editJob"></div><div id="editOut" class="out"></div>
+</section>
+
+<section id="tab-up" class="page hidden">
+  <button id="upPick" class="wide">📷 Pick a photo</button>
+  <img id="upIn" class="preview hidden" alt=""><p id="upInfo" class="muted small"></p>
+  <div class="row">
+    <label class="grow">Scale<select id="upScale"><option>2</option><option selected>4</option><option>8</option></select></label>
+    <label class="grow">Model<select id="upModel"><option value="sharp">Sharp (Real-ESRGAN)</option><option value="fast">Fast</option></select></label>
+  </div>
+  <button id="upGo" class="primary wide">Upscale</button>
+  <div id="upJob"></div><div id="upOut" class="out"></div>
+</section>
+
+<section id="tab-mon" class="page hidden"><div id="monBox"></div><p class="muted small">Updates every 2 s. The laptop appears when its NpuStudio app is open and paired.</p></section>
+
+<section id="tab-desk" class="page hidden"><div id="deskBox"></div>
+  <button id="deskRe" class="ghost">Refresh</button>
+  <button id="unpair" class="ghost danger">Forget pairing key</button>
+</section>
+</main>
+
+<nav id="tabs" class="hidden">
+  <button data-t="chat" class="on">💬<span>Chat</span></button>
+  <button data-t="gen">🎨<span>Gen</span></button>
+  <button data-t="edit">✏️<span>Edit</span></button>
+  <button data-t="up">🔍<span>Upscale</span></button>
+  <button data-t="mon">📈<span>Monitor</span></button>
+  <button data-t="desk">🖥️<span>Desktop</span></button>
+</nav>
+
+<div id="dlg" class="dlg hidden"><div class="card"><p id="dlgQ"></p><div class="row"><button id="dlgNo" class="grow">No</button><button id="dlgYes" class="primary grow">Yes</button></div></div></div>
+<input type="file" id="fileIn" accept="image/*" class="hidden">
+<script src="app.js"></script>
+</body></html>
