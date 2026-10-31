@@ -319,7 +319,13 @@ def api_job(kind, a, j):
                 raise ValueError("Couldn't find what to change. Name the thing (e.g. 'change outfit to a red dress'), paint it with the brush, "
                                  "or tick 'Whole picture' for a whole-picture change. Nothing was changed.")
             st_ = float(a.get("strength", 0.4)); r = c.edit_whole(im, instr, ana, strength=max(0.2, min(0.6, st_)), progress=prog, status=stat)
-        return {"image": imgb64(r[0]), **save_out(r[0], "aichange", stat, instr), "device": ", ".join(r[1]) if isinstance(r[1], (tuple, list)) else str(r[1]), "method": r[2], "prompt": r[3], "analysis": ana}
+        cbox = None
+        try:   # where the picture changed, so the phone can show a zoomed before/after (eye fixes are tiny at phone size)
+            from PIL import ImageChops
+            if r[0].size == im.size:
+                cbox = ImageChops.difference(r[0].convert("RGB"), im).convert("L").point(lambda v: 255 if v > 12 else 0).getbbox()
+        except Exception: logging.exception("changed box")
+        return {"image": imgb64(r[0]), "changed_box": list(cbox) if cbox else None, "unchanged": r[0] is im, **save_out(r[0], "aichange", stat, instr), "device": ", ".join(r[1]) if isinstance(r[1], (tuple, list)) else str(r[1]), "method": r[2], "prompt": r[3], "analysis": ana}
     if kind == "chat":       # allowlisted PC actions run on THIS PC; a CONFIRM action waits for POST .../confirm
         eng = chat_engine(stat); out = []
         def on_text(t): out.append(t); j["text"] = "".join(out)

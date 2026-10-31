@@ -1,7 +1,7 @@
 // NpuStudio Companion web UI. Served by the desktop at /app; the Android shell (window.NpuShell) is optional.
 "use strict";
 const $ = id => document.getElementById(id);
-const UI_VERSION = "1.6.2";
+const UI_VERSION = "1.6.3";
 const Shell = window.NpuShell || null;
 const shellVersion = Shell && Shell.shellVersion ? Number(Shell.shellVersion()) : 0;
 
@@ -366,7 +366,26 @@ async function editJob(body, label) {
   document.querySelectorAll("#editTools button").forEach(b => b.disabled = true);
   const r = await runJob(body, $("editJob"), label, { done: (r, s) => `${label} done in ${s} s${r.device ? " on " + r.device : ""}` });
   document.querySelectorAll("#editTools button").forEach(b => b.disabled = false);
-  if (r) { pushEdit("data:image/png;base64," + r.image); $("editOut").innerHTML = `<p class="muted small">${esc(label)} done on ${esc(r.device || "")} in ${r.seconds || "?"} s${r.method ? " · " + esc(r.method) : ""}. Undo to revert.</p>`; }
+  if (!r) return;
+  const before = ED.cur, url = "data:image/png;base64," + r.image;
+  if (r.unchanged) { $("editOut").innerHTML = `<p class="muted small">${esc(label)}: picture unchanged${r.method ? " · " + esc(r.method) : ""}</p>`; return; }
+  pushEdit(url);
+  $("editOut").innerHTML = `<p class="muted small">${esc(label)} done on ${esc(r.device || "")} in ${r.seconds || "?"} s${r.method ? " · " + esc(r.method) : ""}. Undo to revert.</p>`;
+  if (r.changed_box) showChange(before, url, r.changed_box);
+  $("stage").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+// Zoomed before/after of the changed area: small changes (eye fixes) are invisible on the full picture at phone size.
+async function showChange(beforeUrl, afterUrl, box) {
+  try {
+    const [a, b] = await Promise.all([loadImg(beforeUrl), loadImg(afterUrl)]);
+    let [x0, y0, x1, y1] = box; const pw = (x1 - x0) * 0.25 + 16, ph = (y1 - y0) * 0.25 + 16;
+    x0 = Math.max(0, x0 - pw); y0 = Math.max(0, y0 - ph); x1 = Math.min(b.naturalWidth, x1 + pw); y1 = Math.min(b.naturalHeight, y1 + ph);
+    if ((x1 - x0) * (y1 - y0) > 0.6 * b.naturalWidth * b.naturalHeight) return;   // big change: the main preview shows it
+    const mk = (im, t) => { const c = document.createElement("canvas"); c.width = x1 - x0; c.height = y1 - y0;
+      c.getContext("2d").drawImage(im, x0, y0, c.width, c.height, 0, 0, c.width, c.height);
+      return `<figure style="margin:0;flex:1"><img src="${c.toDataURL("image/png")}" style="width:100%;image-rendering:auto;border-radius:6px"><figcaption class="small muted">${t}</figcaption></figure>`; };
+    $("editOut").insertAdjacentHTML("beforeend", `<div class="small muted">Changed area (zoomed):</div><div class="row" style="gap:6px;align-items:flex-start">${mk(a, "Before")}${mk(b, "After")}</div>`);
+  } catch (e) {}
 }
 $("eraseGo").onclick = () => { const m = maskB64(); if (!m) return notice("Paint over what to erase first (tick Paint)."); editJob({ type: "erase", image: curB64(), mask: m }, "AI erase"); };
 $("editBg").onclick = () => editJob({ type: "remove_bg", image: curB64() }, "Remove background");
