@@ -31,7 +31,16 @@ def build_analyze_tab(root, nb, edit_box, gen_prompt, gtab, dnd=None):
     devv = tk.StringVar(value="Auto"); txtv = tk.BooleanVar(value=False)
     ttk.Button(top, text="Open picture...", command=lambda: openf()).pack(side="left")
     ttk.Label(top, text="  Chip").pack(side="left"); ttk.Combobox(top, textvariable=devv, values=["Auto", "NVIDIA", "Intel Arc", "CPU"], width=10, state="readonly").pack(side="left", padx=4)
-    gob = ttk.Button(top, text="Analyze", command=lambda: run()); gob.pack(side="left", padx=4)
+    gob = ttk.Button(top, text="\U0001F504 Re-analyze", command=lambda: run()); gob.pack(side="left", padx=4)
+    def _tip(w, text):
+        t = {}
+        def on(e):
+            t["w"] = tw = tk.Toplevel(w); tw.wm_overrideredirect(True); tw.wm_geometry(f"+{e.x_root + 12}+{e.y_root + 16}")
+            tk.Label(tw, text=text, background="#ffffe0", relief="solid", borderwidth=1, padx=4).pack()
+        def off(e):
+            if t.get("w"): t.pop("w").destroy()
+        w.bind("<Enter>", on); w.bind("<Leave>", off)
+    _tip(gob, "Run the analysis again (e.g. after changing Chip)")
     ttk.Checkbutton(top, text="Save .txt to output\\analyze", variable=txtv).pack(side="left", padx=8)
     body = ttk.Frame(f); body.pack(fill="both", expand=True, padx=6)
     pv = tk.Label(body, text="Open or drop a picture here", bg="#2b2b2b", fg="#bbb", width=48); pv.pack(side="left", fill="both", expand=False)
@@ -55,7 +64,7 @@ def build_analyze_tab(root, nb, edit_box, gen_prompt, gtab, dnd=None):
     def load(src):
         try:
             im = Image.open(src).convert("RGB") if not isinstance(src, Image.Image) else src.convert("RGB")
-            st["img"] = im; show(im); sizev.set(f"Size: {im.size[0]} x {im.size[1]}"); gob.configure(text="Analyze"); run()
+            st["img"] = im; show(im); sizev.set(f"Size: {im.size[0]} x {im.size[1]}"); run()
         except Exception as e: status.set(f"Couldn't open: {e}")
     def openf():
         p = filedialog.askopenfilename(filetypes=[("Images", "*.png *.jpg *.jpeg *.webp *.bmp"), ("All", "*.*")])
@@ -74,7 +83,7 @@ def build_analyze_tab(root, nb, edit_box, gen_prompt, gtab, dnd=None):
                 sp = imganalyze.save_txt(r) if txtv.get() else None
                 def done():
                     dt.delete("1.0", "end"); dt.insert("1.0", r["description"]); pt.delete("1.0", "end"); pt.insert("1.0", r["prompt"]); posev.set("Pose: " + r.get("pose", "-"))
-                    status.set(f"Analyzed in {r['seconds']} s on {r['device']}" + (f" - saved {sp}" if sp else "")); gob.configure(text="Re-analyze")
+                    status.set(f"Analyzed in {r['seconds']} s on {r['device']}" + (f" - saved {sp}" if sp else "")); pass
                 ui(done)
             except Exception as e: logging.exception("analyze tab"); ui(status.set, f"Error: {e}")
             finally: st["busy"] = False; ui(lambda: gob.state(["!disabled"]))
