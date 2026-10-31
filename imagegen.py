@@ -244,10 +244,10 @@ def build_gen_tab(root, nb, send_to_upscale=None, get_upscaler=None, up_models=N
                 import json as _js; im.info["npustudio_gen"] = _js.dumps({"prompt": prompt, "negative": neg, "seed": seed, "steps": steps, "width": tw, "height": th, "model": "imagegen"})
                 import outputs; outputs.autosave(im, "gen", prompt)
                 dt = time.time() - t; t_up = dt - t_draw
-                w, h = tw, th
-                st["img"] = im; logging.info("imagegen %s steps=%s seed=%s %.2fs %s", (w, h), steps, seed, dt, g.devs)
+                ow, oh = tw, th
+                st["img"] = im; logging.info("imagegen %s steps=%s seed=%s %.2fs %s", (ow, oh), steps, seed, dt, g.devs)
                 ui(lambda: (show(im), dev.set(devtxt(g)), sv.configure(state="normal"), su.configure(state="normal" if send_to_upscale else "disabled"), se.configure(state="normal" if send_to_edit else "disabled"),
-                            pb.configure(value=100), status.set(f"Done {w}x{h} in {dt:.1f}s (draw {t_draw:.1f}s, UNet on {g.devs[1]}" + (f"; upscale {t_up:.1f}s on {upd}" if up > 1 else "") + f"; seed {seed}{fxn})")))
+                            pb.configure(value=100), status.set(f"Done {ow}x{oh} in {dt:.1f}s (draw {t_draw:.1f}s, UNet on {g.devs[1]}" + (f"; upscale {t_up:.1f}s on {upd}" if up > 1 else "") + f"; seed {seed}{fxn})")))
                 logging.info("imagegen final %sx%s draw %.1fs up %.1fs (%s on %s)", w, h, t_draw, t_up, upname, upd)
             except Exception as e:
                 logging.exception("imagegen"); ui(status.set, f"Error: {e}")
