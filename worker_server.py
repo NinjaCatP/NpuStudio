@@ -254,7 +254,7 @@ def api_job(kind, a, j):
     if kind == "gen":
         import imagegen, cudaeng
         tw, th = int(a.get("width", 768)), int(a.get("height", 768)); (w, h), up = imagegen.plan_for(tw, th)
-        im = cudaeng.gen(a["prompt"], w, h, int(a.get("steps", 4)), int(a.get("seed", 42)), prog, stat)
+        im = cudaeng.gen(a["prompt"], w, h, int(a.get("steps", 4)), int(a.get("seed", 42)), progress=prog, status=stat)
         upn = "Fast (Intel SR-1032)" if str(a.get("upscaler", "sharp")).lower() == "fast" else "Sharp (Real-ESRGAN x4plus)"
         if up > 1: stat(f"upscaling {up}x ({upn.split(' (')[0]})..."); im = upscaler(upn).upscale_to(im, up, prog)
         im = imagegen.fit_crop(im, tw, th); fx = ""

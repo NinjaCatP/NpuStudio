@@ -66,7 +66,7 @@ class ImageGen:
         import remote
         if (w, h) != self.size or self.pref != devices.get() or (self.devs and self.devs[0] in ("Desktop PC", "Laptop")) != remote.active(): self.build(w, h)
         if self.cuda:
-            import cudaeng; return cudaeng.gen(prompt, w, h, int(steps), int(seed), progress)
+            import cudaeng; return cudaeng.gen(prompt, w, h, int(steps), int(seed), progress=progress)
         def cb(step, n, latent):
             if progress: progress(step + 1, n)
             return bool(cancel and cancel())

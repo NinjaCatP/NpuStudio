@@ -154,6 +154,11 @@ def start_reporter(name="Laptop"):
     threading.Thread(target=loop, daemon=True, name="remote-report").start()
 _rep = [False]
 
+def _params(fn):
+    import inspect
+    try: return [p.name for p in inspect.signature(fn).parameters.values() if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)]
+    except Exception: return []
+
 def install():
     """Route the CUDA diffusion engines (AI Change redraw/pose/recolor, Image Gen) to the desktop while a remote Device is
     picked. Wraps cudaeng's functions at run time (cudaeng.py itself is unchanged); falls back to local when offline."""
@@ -163,7 +168,14 @@ def install():
     for name in ("ip2p", "inpaint", "inpaint_cn", "inpaint_pose", "gen"):
         orig = getattr(cudaeng, name, None)
         if orig is None: continue
-        def wrap(*a, _o=orig, _n=name, progress=None, status=None, **kw):
+        def wrap(*a, _o=orig, _n=name, _sig=_params(orig), progress=None, status=None, **kw):
+            a = list(a)     # progress/status passed positionally (e.g. imagegen -> gen(prompt, w, h, steps, seed, progress)) -> keywords
+            for k in ("status", "progress"):
+                i = _sig.index(k) if k in _sig else -1
+                if 0 <= i < len(a):
+                    v = a.pop(i)
+                    if k == "progress" and progress is None: progress = v
+                    if k == "status" and status is None: status = v
             if not is_local() and active():
                 t = time.time(); r = call(_n, *a, progress=progress, status=status, **kw)
                 logging.info("remote %s %.1fs", _n, time.time() - t); return r
