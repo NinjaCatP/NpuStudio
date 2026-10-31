@@ -1,4 +1,4 @@
-import sys; sys.path.insert(0, "/workspace/npustudio-github"); import actions
+import sys; import os; sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import actions
 P = [("Set brightness to a 100%", "brightness", {"level": 100}), ("set brightness to 40", "brightness", {"level": 40}),
  ("brightness 70%", "brightness", {"level": 70}), ("max brightness", "brightness", {"level": 100}), ("turn brightness all the way up", "brightness", {"level": 100}),
  ("minimum brightness", "brightness", {"level": 0}), ("turn the brightness up", "brightness_change", None), ("turn down the brightness", "brightness_change", None),
