@@ -153,9 +153,14 @@ def seg_mask(im, targets, thresh=0.4):
     m = Image.fromarray(((p > th) * 255).astype(np.uint8)).resize(im.size, Image.BILINEAR)
     return m.filter(ImageFilter.GaussianBlur(2)).point(lambda v: 255 if v > 127 else 0), float(p.max())
 
+def _atext(a):
+    if isinstance(a, (tuple, list)): a = a[0] if a else ""
+    return a if isinstance(a, str) else ("" if a is None else str(a))
+
 def find_mask(im, tgt, instr="", analysis=""):
     """The one target finder for AI Change (desktop app, laptop app, phone API): face parts on upscaled face crops,
     then the body/clothing parser, then CLIPSeg. -> (L mask, confidence, how)."""
+    analysis = _atext(analysis); tgt = _atext(tgt) if isinstance(tgt, (tuple, list)) else tgt
     t = time.time(); r = None
     if part_key(tgt or "") or part_key(instr or ""):
         try: r = find_part(im, tgt if part_key(tgt or "") else instr)
@@ -428,6 +433,7 @@ NEG = ("deformed eyes, asymmetrical eyes, cross-eyed, lazy eye, extra pupils, mi
        "child, childlike, younger, baby face, loli, different person, makeup change, text, watermark")
 
 def _style(im, analysis=""):
+    analysis = _atext(analysis)
     try:
         import aichange
         if re.search(aichange.ILLU, analysis or "", re.I): return "anime"

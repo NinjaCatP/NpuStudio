@@ -296,7 +296,7 @@ def api_job(kind, a, j):
         import aichange
         if _chg["c"] is None: _chg["c"] = aichange.Changer()
         c = _chg["c"]; im = b64img(a["image"]).convert("RGB"); instr = a["instruction"]
-        stat("analyzing picture..."); ana = c.analyze(im, stat)
+        stat("analyzing picture..."); ana = aichange.atext(c.analyze(im, stat))   # analyze() -> (text, device, secs)
         mask = b64img(a["mask"]).convert("L").resize(im.size) if a.get("mask") else None
         if mask is None:
             try:

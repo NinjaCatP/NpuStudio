@@ -35,13 +35,20 @@ STYLE_RE = r"(watercolou?r|oil painting|painting|sketch|drawing|cartoon|anime|pi
 def style_of(analysis):
     m = re.search(STYLE_RE, analysis or "", re.I); return m.group(1).lower() if m else "photo"
 
+def atext(a):
+    """Picture description as text: Changer.analyze() returns (text, device, seconds); callers may pass either."""
+    if isinstance(a, (tuple, list)): a = a[0] if a else ""
+    return a if isinstance(a, str) else ("" if a is None else str(a))
+
 def template_prompt(analysis, instr):
+    analysis = atext(analysis)
     subj = re.split(r"[.\n]", analysis.strip())[0] if analysis.strip() else ""
     subj = re.sub(r"^(the|this) (image|picture|photo) (shows|depicts|features)\s*", "", subj, flags=re.I).strip(" ,.")
     ch = re.sub(r"(?i)^(please\s+)?(make|turn|change|convert)\s+(it|this|the (image|picture|photo|scene))\s+(into|to)?\s*", "", instr.strip().rstrip("."))
     return ", ".join(x for x in [subj, ch, "highly detailed, best quality"] if x)
 
 def masked_prompt(analysis, rep):
+    analysis = atext(analysis)
     """Just the new object + light context: works far better for inpainting than a long scene prompt."""
     rep = re.sub(r"(?i)^(an?|the)\s+", "", rep.strip().rstrip("."))
     light = ""
@@ -167,6 +174,7 @@ class Changer:
         raise RuntimeError("img2img: no device worked: " + " | ".join(err))
 
     def edit_whole(self, im, instr, analysis="", strength=0.4, seed=1, progress=None, status=None, upscaler=None):
+        analysis = atext(analysis)
         """Whole-image change. NVIDIA: InstructPix2Pix (takes the instruction directly, keeps faces).
         Otherwise LCM img2img with a rewritten scene prompt. Returns (img, devices, how, prompt_used)."""
         try:
@@ -195,6 +203,7 @@ class Changer:
 
     ATTR = r"\b(outfit|clothes|clothing|shirt|top|dress|jacket|coat|suit|pants|skirt|shoes|hair|skin|eyes|eye|lips|eyebrows|beard|face|arms|legs|hands|color|colour|hat)\b"
     def edit_masked(self, ai, im, mask, instr, analysis="", strength=1.0, progress=None, status=None, upscaler=None, method="Auto"):
+        analysis = atext(analysis)
         """Masked change, routed by intent (method Auto/Redraw/Recolor):
           recolor = colour/material change of the same thing -> InstructPix2Pix kept inside the mask (NVIDIA)
           redraw  = new object / garment ("outfit to red dress", "replace X with Y") -> SD inpainting, strength 1.0,
@@ -472,6 +481,7 @@ def method_for(rep):
 
 ILLU = r"\b(cartoon|anime|manga|illustration|illustrated|drawing|drawn|comic|animated|cel|vector|digital art|chibi)\b"
 def redraw_prompt(analysis, tgt, rep):
+    analysis = atext(analysis)
     rep = re.sub(r"(?i)^(an?|the)\s+", "", (rep or "").strip().rstrip("."))
     if re.search(ILLU, analysis or "", re.I): style = "anime illustration, clean line art, bold outlines, flat vibrant colors"
     else: style = style_of(analysis) + ", realistic, natural lighting"
@@ -523,6 +533,7 @@ def is_global(s):
 SYN = {"outfit": ["clothing", "suit", "outfit"], "clothes": ["clothing", "suit"], "shirt": ["shirt", "top"], "hair": ["hair"],
        "background": ["background", "wall"], "sky": ["sky"], "face": ["face"]}
 def targets_for(tgt, analysis=""):
+    analysis = atext(analysis)
     t = tgt.lower(); out = [tgt]
     for k, v in SYN.items():
         if k in t: out += v
