@@ -84,16 +84,17 @@ def arm_mask(im, kp_old, kp_new, protect):
     import aichange
     W, H = im.size; rs, ls, sw, ysh, tl = frame(kp_old); w = max(8, int(sw * 0.28))
     old = np.asarray(aichange.pose_mask(im, Image.new("L", im.size, 0))[0]) > 127
-    new = Image.new("L", im.size, 0); d = ImageDraw.Draw(new)
+    new = Image.new("L", im.size, 0); d = ImageDraw.Draw(new); oldi = Image.new("L", im.size, 0); od = ImageDraw.Draw(oldi)
     for a, b, c in ((RSH, REL, RWR), (LSH, LEL, LWR)):
         if kp_new[b] != kp_old[b] or kp_new[c] != kp_old[c]:
             pts = [kp_new[a], kp_new[b], kp_new[c]]
             d.line(pts, fill=255, width=w * 2, joint="curve")
             x, y = kp_new[c]; d.ellipse((x - w * 1.3, y - w * 1.3, x + w * 1.3, y + w * 1.3), fill=255)
             for p in (kp_old[b], kp_old[c]):  # where the old arm was
-                if p: d.ellipse((p[0] - w * 1.2, p[1] - w * 1.2, p[0] + w * 1.2, p[1] + w * 1.2), fill=255)
-            d.line([kp_old[a], kp_old[b] or kp_old[a], kp_old[c] or kp_old[a]], fill=255, width=int(w * 2.2))
-    n = np.asarray(new) > 127
+                if p: od.ellipse((p[0] - w * 1.2, p[1] - w * 1.2, p[0] + w * 1.2, p[1] + w * 1.2), fill=255)
+            od.line([kp_old[a], kp_old[b] or kp_old[a], kp_old[c] or kp_old[a]], fill=255, width=int(w * 2.2))
+    n = np.asarray(new) > 127; global _last_new; _last_new = n
+    old = old | ((np.asarray(oldi) > 127) & ~protect)
     m = (old | n) & ~(protect & ~n)
     hard = Image.fromarray((m * 255).astype(np.uint8)).filter(ImageFilter.MedianFilter(5))
     return hard, hard.filter(ImageFilter.GaussianBlur(2))
@@ -139,9 +140,9 @@ def redraw_pose(im, pose, prompt_neg, progress=None, status=None, N=4):
         if kp[j] is None: kp[j] = (kp[s][0], kp[s][1] + frame(kp)[4] * d)
     kt = target(kp, pose)
     # protect face/hair + the outfit silhouette (lineart keeps the outline); arms may pass in front where the pose needs it
-    prot = np.zeros((H, W), bool)
+    prot = np.zeros((H, W), bool); outfit = np.zeros((H, W), bool)
     try:
-        prot |= np.asarray(aichange.outfit_mask(im, Image.new("L", im.size, 0), "outfit")[0]) > 127
+        outfit = np.asarray(aichange.outfit_mask(im, Image.new("L", im.size, 0), "outfit")[0]) > 127; prot |= outfit
         s = aichange._seg()
         if s is not None:
             q = np.max([s.probs(im, t) for t in ("face", "hair")], axis=0)
@@ -149,22 +150,40 @@ def redraw_pose(im, pose, prompt_neg, progress=None, status=None, N=4):
     except Exception: logging.exception("pose protect")
     hard, soft = arm_mask(im, kp, kt, prot)
     lineart = aichange.control_map(im, hard, "loose")
+    a0 = np.asarray(im, np.float32); ref = np.median(a0[outfit], 0) if outfit.sum() > 200 else None
+    _r = max(3, int(frame(kp)[2] * 0.12)); nb = Image.fromarray((_last_new * 255).astype(np.uint8)).filter(ImageFilter.GaussianBlur(_r)).point(lambda v: 255 if v > 8 else 0)
+    R = (np.asarray(hard) > 127) & ~prot & ~(np.asarray(nb) > 127)  # margin: the drawn arm may sit a little off the bone line  # around the old arm, outside her outline: must stay background
+    ring = (np.asarray(hard.filter(ImageFilter.MaxFilter(31))) > 127) & ~(np.asarray(hard) > 127) & ~prot
+    bgc = np.median(a0[ring], 0) if ring.sum() > 50 else None
+    keepbg = None
+    if bgc is not None:
+        kb = R & (np.sqrt(((a0 - bgc) ** 2).sum(-1)) < 45)
+        keepbg = Image.fromarray((kb * 255).astype(np.uint8)).filter(ImageFilter.MinFilter(3)).filter(ImageFilter.GaussianBlur(1.5))
+    def spill(r):
+        """Share of the area outside her old outline (minus the new arm path) that now holds something other than background."""
+        if bgc is None or R.sum() < 100: return 0.0
+        b = np.asarray(r, np.float32)
+        newstuff = (np.sqrt(((b - bgc) ** 2).sum(-1)) > 45) & (np.sqrt(((b - a0) ** 2).sum(-1)) > 30)
+        return float(newstuff[R].mean())
     pimg = pose_image(kt, W, H)
     p, neg = prompt_neg
     p = {"wave": "open palm waving hello, fingers spread, ", "crossed": "forearms folded in front of her waist, "}.get(pose, "") + p
     neg += ", fist, changed body shape, extra breast, deformed torso"
     best = None
-    for i in range(N):
+    for i in range(N * 2):
+        if i == N and best is not None and best[0] >= 0.5: break  # second seed batch only if the first all failed
         if status: status(f"Drawing the new pose - version {i + 1} of {N} (OpenPose + lineart ControlNet, NVIDIA)...")
         r = cudaeng.inpaint_pose(im, hard, lineart, pimg, p, neg, seed=21 + i * 13, progress=progress)
         r = Image.composite(r, im, soft)
+        if keepbg is not None: r = Image.composite(im, r, keepbg)  # outside her outline and off the new arm path: background stays
         chest = hand_on_chest(r) and pose != "crossed"
-        m = pose_match(r, kt); sc = -1 if chest else m
-        logging.info("pose candidate %d match %.2f chest %s", i, m, chest)
+        sp = spill(r); m = pose_match(r, kt); sc = -1 if chest else (-0.5 if sp > 0.3 else m)
+        logging.info("pose candidate %d match %.2f chest %s silhouette-spill %.2f", i, m, chest, sp)
         if os.environ.get("NPUSTUDIO_DEBUG"): r.save(f"pose_cand_{i}.jpg", quality=85)
         if best is None or sc > best[0]: best = (sc, r, m)
     sc, r, m = best
-    if sc < 0: return im, "Method: pose redraw - every version put a hand on the body, so nothing was kept"
+    if sc <= -1: return im, "Method: pose redraw - every version put a hand on the body, so nothing was kept"
+    if sc < 0: return im, "NOT DONE - every version changed her outline (silhouette check). Original kept; try again."
     how = f"Method: pose redraw (OpenPose + lineart ControlNet, {src}, best of {N}, pose match {m:.2f})"
     if m < 0.5: how += " - weak pose match"
     return r, how

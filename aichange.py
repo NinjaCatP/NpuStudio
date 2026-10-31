@@ -236,17 +236,26 @@ class Changer:
             import cudaeng; cn_ok = cudaeng.available() and bool(devices.plan("inpaint")) and devices.plan("inpaint")[0] == "NVIDIA"
         except Exception: pass
         best = None; N = 4; d = ("NVIDIA",)
+        rejects = []
         if cn_ok:
             # general engine: ControlNet (anime lineart) inpaint inside the target mask. "keep" = outline held, interior
             # lines removed (same-shape swaps); "loose" = only the surroundings guide it, so the shape may change inside the mask
             cp, cneg = change_prompt(analysis, tgt, rep, col, garment)
-            for i in range(N):
-                if status: status(f"Drawing '{rep}' - version {i + 1} of {N} (ControlNet {ctl}, NVIDIA)...")
+            bright = bool(re.search(r"\b(bright|vivid|neon|light)\b", rep or "", re.I))
+            qkind = "garment" if garment else ("background" if re.search(r"\b(background|sky|wall|scene)\b", tgt or "", re.I) else "")
+            rejects = []
+            for i in range(N * 2):
+                if i == N:
+                    if best is not None and best[0] >= COLOR_OK: break
+                    cp = (f"{col} {col} {col}, " if col else "") + cp; logging.info("second batch, stronger prompt")  # retry
+                if status: status(f"Drawing '{rep}' - version {i + 1} (ControlNet {ctl}, NVIDIA)...")
                 try: r = cn_redraw(im, hard, soft, cp, cneg, seed=11 + i * 7, progress=progress, status=status, mode=ctl)
                 except Exception: logging.exception("controlnet redraw"); break
-                cs_ = color_score(r, hard, col) if col else 1.0; ch = changed_score(im, r, hard)
+                cs_ = color_score(r, hard, col, bright) if col else 1.0; ch = changed_score(im, r, hard)
                 sc = cs_ * (1.0 if ch > 0.35 else 0.4)
                 if hair_short: sc = hair_short_score(im, r, hard, col)
+                qok, why = quality_checks(im, r, hard, qkind)
+                if not qok: rejects.append(why); logging.info("candidate %d rejected: %s", i, why); sc = min(sc, -0.5)
                 if tgt == "arms":
                     try:
                         import posegen
@@ -267,8 +276,13 @@ class Changer:
         how = f"Method: redraw ({'ControlNet ' + ctl if cn_ok else 'inpaint'}, best of {N}, changed {ch:.2f}" + (f", colour {cs_:.2f})" if col else ")")
         if hair_short and sc >= 0.6: how += f" (short-hair check {sc:.2f})"
         elif hair_short: how += f" - short-hair check failed ({sc:.2f})"; sc = 1.0
-        if sc < 0: how = "Method: redraw - every version put a hand on the body, so nothing was kept; try again"; r = im.convert("RGB")
-        if sc < COLOR_OK and col and (garment or re.search(r"\bhair\b", f"{tgt} {rep}", re.I)) and not re.search(SHAPE_CHANGE, rep or "", re.I):
+        if sc <= -1: how = "Method: redraw - every version put a hand on the body, so nothing was kept; try again"; r = im.convert("RGB")
+        elif sc < 0:
+            how = f"NOT DONE - all {len(rejects)} versions failed the quality checks ({'; '.join(sorted(set(rejects))[:3])}). Original kept; try rewording or painting the area."
+            r = im.convert("RGB"); sc = 1.0
+        if sc < COLOR_OK and col and re.search(r"\b(different|new|another)\s+(style|design|cut)\b", rep or "", re.I):
+            how = f"NOT DONE - no version came out {col} enough (best colour {cs_:.2f}) with a new design. Original kept; try again or reword."; r = im.convert("RGB")
+        elif sc < COLOR_OK and col and (garment or re.search(r"\bhair\b", f"{tgt} {rep}", re.I)) and not re.search(SHAPE_CHANGE, rep or "", re.I):
             r = recolor_fill(im.convert("RGB"), hard, col); how = f"Method: LAST RESORT recolor of the original (redraw failed: changed {ch:.2f}, colour {cs_:.2f})"
         elif sc < COLOR_OK: how += " - weak result, try another wording or brush the area"
         if im.mode == "RGBA": r = r.convert("RGBA"); r.putalpha(im.getchannel("A"))
@@ -504,7 +518,7 @@ def outfit_mask(im, mask, tgt):
         if bodyparse.available():
             hn = bodyparse.net("human-parse"); lab = hn.seg(im)
             seg_clothes = np.isin(lab, hn.ids(["upper-clothes", "dress", "skirt", "pants", "belt"])); u |= seg_clothes
-            prot |= np.isin(lab, hn.ids(["face", "hair", "left-arm", "right-arm", "left-leg", "right-leg"]))
+            prot |= np.isin(lab, hn.ids(["face", "hair", "hat", "left-arm", "right-arm", "left-leg", "right-leg"]))
     except Exception: logging.exception("outfit_mask bodyparse")
     s = _seg()
     def cs(words, lo, frac):
@@ -514,6 +528,7 @@ def outfit_mask(im, mask, tgt):
         try:
             u |= cs(("outfit", "clothing", "dress", "shirt", "skirt", "uniform"), 0.2, 0.35)
             prot |= cs(("face", "hair"), 0.35, 0.5)
+            if not re.search(r"\b(hat|cap|helmet)\b", tgt or "", re.I): prot |= cs(("hat", "nurse cap"), 0.35, 0.5)
         except Exception: logging.exception("outfit_mask clipseg")
     g = max(3, int(min(W, H) * 0.006))
     coarse = np.asarray(grow(Image.fromarray((u * 255).astype(np.uint8)), g * 4)) > 127
@@ -534,10 +549,58 @@ def outfit_mask(im, mask, tgt):
     else:
         hard = np.asarray(grow(Image.fromarray((u * 255).astype(np.uint8)), g)) > 127
         hard &= ~prot
-    hard = Image.fromarray((hard * 255).astype(np.uint8))
-    return hard, hard.filter(ImageFilter.GaussianBlur(1.2))
+    hard = solid_mask(hard, prot)
+    return hard, feather(hard)
 
-def color_score(img, mask, col):
+def solid_mask(m, prot=None):
+    """Fill holes, drop specks, keep the big pieces and smooth the edge so a redraw never leaves old-garment patches."""
+    from PIL import ImageFilter
+    m = np.asarray(m) > 127 if not isinstance(m, np.ndarray) else m.copy()
+    try:
+        from scipy import ndimage as nd
+        m = nd.binary_fill_holes(m)
+        lab, n = nd.label(m)
+        if n > 1:
+            sz = nd.sum(m, lab, range(1, n + 1)); keep = np.isin(lab, 1 + np.nonzero(sz >= max(400, sz.max() * 0.05))[0]); m = keep
+    except Exception: logging.exception("solid_mask")
+    if prot is not None: m &= ~prot
+    im = Image.fromarray((m * 255).astype(np.uint8)).filter(ImageFilter.GaussianBlur(2.5))
+    return im.point(lambda v: 255 if v > 127 else 0)
+
+def feather(hard, r=2.5):
+    """Soft blend weight: full inside, fading over ~r px across the edge (centred on it)."""
+    from PIL import ImageFilter
+    return hard.filter(ImageFilter.MaxFilter(3)).filter(ImageFilter.GaussianBlur(r))
+
+def quality_checks(orig, new, hard, kind=""):
+    """-> (ok, reason). Rejects: old garment left inside the mask, blotchy/torn texture, new skin (stray hands) in a
+    background, and fabric spilling outside the original outline."""
+    from PIL import ImageFilter
+    m = np.asarray(hard) > 127
+    if m.sum() < 200: return True, ""
+    inner = np.asarray(hard.filter(ImageFilter.MinFilter(7))) > 127
+    a = np.asarray(orig.convert("RGB"), np.float32); b = np.asarray(new.convert("RGB"), np.float32)
+    ho = np.asarray(orig.convert("RGB").convert("HSV"), np.float32) / 255.0; hn = np.asarray(new.convert("RGB").convert("HSV"), np.float32) / 255.0
+    if kind == "garment":
+        left = (np.sqrt(((b - a) ** 2).sum(-1)) < 18)[inner].mean()  # untouched old pixels
+        if left > 0.12: return False, f"old garment left ({left:.2f})"
+        def hf(x):
+            g = np.asarray(x.convert("L"), np.float32); bl = np.asarray(x.convert("L").filter(ImageFilter.GaussianBlur(2)), np.float32); return np.abs(g - bl)
+        no, nn = hf(orig)[inner].mean(), hf(new)[inner].mean()
+        if nn > max(6.0, no * 2.2): return False, f"blotchy texture ({nn:.1f} vs {no:.1f})"
+        # outline: the redraw must fill its mask (no background showing through = torn/warped edge)
+        ring = m & ~inner
+        bgc = np.median(a[~(np.asarray(hard.filter(ImageFilter.MaxFilter(15))) > 127)], 0)
+        torn = (np.sqrt(((b - bgc) ** 2).sum(-1)) < 25)[inner].mean()
+        if torn > 0.04: return False, f"torn/warped outline ({torn:.2f})"
+    if kind == "background":
+        skin = lambda h: (h[..., 0] > 0.02) & (h[..., 0] < 0.11) & (h[..., 1] > 0.25) & (h[..., 1] < 0.75) & (h[..., 2] > 0.25) & (h[..., 2] < 0.9)
+        edge = m & ~(np.asarray(hard.filter(ImageFilter.MinFilter(41))) > 127)  # near her outline
+        inc = (skin(hn) & ~skin(ho))[edge].mean() if edge.any() else 0.0
+        if inc > 0.03: return False, f"stray hand/skin near her edge ({inc:.2f})"
+    return True, ""
+
+def color_score(img, mask, col, bright=False):
     """0..1: how close the masked pixels are to the requested colour (hue for chromatic colours, value for black/white/grey)."""
     import colorsys
     m = np.asarray(mask) > 127
@@ -547,7 +610,11 @@ def color_score(img, mask, col):
     if ts < 0.15:  # achromatic
         return float(np.mean((hsv[:, 1] < 0.25) & (np.abs(hsv[:, 2] - tv) < 0.3)))
     dh = np.abs(hsv[:, 0] - th); dh = np.minimum(dh, 1 - dh)
-    ok = (dh < 0.08) & (hsv[:, 1] > 0.25) & (hsv[:, 2] > 0.12)
+    if col == "yellow": th = 0.155; dh = np.abs(hsv[:, 0] - th); dh = np.minimum(dh, 1 - dh)  # 0.125-0.185: ochre/mustard (~0.10-0.12) fails
+    smin, vmin = 0.4, 0.3
+    if col in ("yellow", "orange", "gold"): vmin = 0.62  # dark yellow/orange = brown/ochre, which is not the colour asked for
+    if bright: smin, vmin = 0.55, max(vmin, 0.68)
+    ok = (dh < (0.03 if col in ("yellow", "orange") else 0.055)) & (hsv[:, 1] > smin) & (hsv[:, 2] > vmin)
     return float(np.mean(ok))
 
 def recolor_fill(img, mask, col):
@@ -588,6 +655,8 @@ def change_prompt(analysis, tgt, rep, col, garment):
     old = [w for w in re.findall(r"\b(?:\w+\s)?(?:uniform|suit|jacket|coat|shirt|dress|cap|hat|helmet|wall|background)\b", analysis or "", re.I)[:3]
            if w.lower() not in (rep or "").lower()]
     if garment: old += ["pattern, print, text, logo, floral, graffiti", "nurse uniform", "collar", "name badge", "buttons", "zipper", "belt", "skin tone fabric", "bare skin", "nude"]
+    if re.search(r"\b(background|sky|wall|scene)\b", t): old += ["hands, arms, fingers, person, people, extra hand, hair strands"]
+    if garment: old += ["torn edges, ragged, stains, dirty, brown, ochre, mustard"] if col == "yellow" else ["torn edges, ragged, stains, dirty"]
     if t == "arms": old += ["hand on chest, hand on breast, touching body, groping, hands on torso"]
     if re.search(r"\bhair\b", t) and re.search(r"\b(short|bob|pixie)\b", rep or "", re.I): old += ["long hair, rainbow hair, colorful hair, multicolored hair"]
     neg = ", ".join([x for x in [tgt if tgt and tgt.lower() not in (rep or "").lower() else "", *old, others] if x] +
@@ -667,24 +736,32 @@ def hair_mask(im, mask):
     """Whole hair, including long anime hair over the shoulders: seed from the human parser + CLIPSeg, then grow through
     connected hair-coloured pixels (saturated or bright, not skin, not the grey wall, not the white outfit). Face cut out."""
     from PIL import ImageFilter
-    W, H = im.size; seed = np.asarray(mask.convert("L")) > 127; prot = np.zeros((H, W), bool)
+    W, H = im.size; seed = np.asarray(mask.convert("L")) > 127; prot = np.zeros((H, W), bool); face_lab = np.zeros((H, W), bool)
     try:
         import bodyparse
         if bodyparse.available():
             hn = bodyparse.net("human-parse"); lab = hn.seg(im)
-            seed |= np.isin(lab, hn.ids(["hair"])); prot |= np.isin(lab, hn.ids(["face"]))
+            seed |= np.isin(lab, hn.ids(["hair"])); face_lab = np.isin(lab, hn.ids(["face"])); prot |= np.isin(lab, hn.ids(["hat"]))
+            for part in ("eyes", "eyebrows", "mouth"):  # face-parser parts: never recolour her eyes
+                try:
+                    pm = bodyparse.mask(im, part)
+                    if pm is not None and pm[1] > 0: prot |= np.asarray(grow(pm[0].convert("L"), 3)) > 127
+                except Exception: logging.exception("hair_mask face part")
     except Exception: logging.exception("hair_mask bodyparse")
     s = _seg()
     if s is not None:
         try:
             p = np.max([s.probs(im, t) for t in ("hair", "long hair", "colorful hair")], axis=0)
             seed |= np.asarray(Image.fromarray(((p > max(0.3, p.max() * 0.5)) * 255).astype(np.uint8)).resize((W, H), Image.BILINEAR)) > 127
-            q = np.max([s.probs(im, t) for t in ("eyes", "mouth", "hat", "nurse cap")], axis=0)
-            prot |= np.asarray(Image.fromarray(((q > max(0.4, q.max() * 0.6)) * 255).astype(np.uint8)).resize((W, H), Image.BILINEAR)) > 127
+            for words, fr in ((("eyes", "mouth"), 0.6), (("hat", "nurse cap"), 0.5)):
+                q = np.max([s.probs(im, t) for t in words], axis=0)
+                prot |= np.asarray(Image.fromarray(((q > max(0.4, q.max() * fr)) * 255).astype(np.uint8)).resize((W, H), Image.BILINEAR)) > 127
         except Exception: logging.exception("hair_mask clipseg")
     hsv = np.asarray(im.convert("RGB").convert("HSV"), np.float32) / 255.0; hh, ss, vv = hsv[..., 0], hsv[..., 1], hsv[..., 2]
     skin = (hh > 0.02) & (hh < 0.11) & (ss > 0.25) & (vv < 0.8)
-    ok = ((ss > 0.3) | ((vv > 0.85) & (ss > 0.12))) & ~skin & ~prot
+    hairc = ((ss > 0.3) | ((vv > 0.85) & (ss > 0.12))) & ~skin
+    prot |= face_lab & ~hairc  # bangs / side locks inside the parser's "face" box are still hair
+    ok = hairc & ~prot
     hair = seed & ok
     hi = Image.fromarray((hair * 255).astype(np.uint8)); okI = ok
     for _ in range(80):  # geodesic growth through hair-coloured pixels

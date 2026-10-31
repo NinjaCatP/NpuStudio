@@ -162,6 +162,10 @@ CHIP MONITOR (window opened from the top bar)
   against the target pose and any version with a hand on the chest/body is thrown away.
 * Hair changes cover the whole hair (long anime hair over the shoulders too); "short" hair also paints the old long
   hair area back to background. Background swaps use the cut-out's soft edge, so no grey halo around the person.
+* Quality guards: colour must really match (strict hue + saturation/brightness - ochre/brown never counts as yellow,
+  "bright" needs a vivid colour); the outfit mask is solid (holes filled, cap excluded) and feather-blended; versions
+  with old-garment patches, blotchy texture, torn outlines or stray hands near a new background are thrown away, a
+  second seed batch is tried, and if nothing passes the status says NOT DONE and the original is kept.
   Extra first-time download for poses: OpenPose ControlNet (~0.7 GB) + OpenPose detector (~0.5 GB).
 
 ------------------------------------------------------------
