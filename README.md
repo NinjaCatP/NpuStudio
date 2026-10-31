@@ -15,9 +15,27 @@ An offline AI studio for Windows laptops with an **Intel Core Ultra NPU** and **
 See [Features.txt](Features.txt) for the full list.
 
 ## Screenshots
-![Chat](docs/screenshots/chat.png)
-![Image Gen](docs/screenshots/image-gen.png)
-![Chip Monitor](docs/screenshots/chip-monitor.png)
+
+### Desktop app
+![Image Gen – 50 steps, auto-fix faces](docs/screenshots/pc-image-gen-autofix-50steps.png)
+![Edit – sent from Gen, AI erase / AI change / brush mask](docs/screenshots/pc-edit-from-gen-fix-buttons.png)
+![Analyze – description, pose, Gen prompt, Re-analyze](docs/screenshots/pc-analyze-pose.png)
+![Chip Monitor – desktop + laptop chips](docs/screenshots/pc-chip-monitor.png)
+![Chat](docs/screenshots/pc-chat.png)
+![Upscale](docs/screenshots/pc-upscale.png)
+
+### Phone web app
+<p>
+<img src="docs/screenshots/phone-chat-control.png" width="200" alt="Chat / PC control">
+<img src="docs/screenshots/phone-gen-autofix-50steps.png" width="200" alt="Image Gen">
+<img src="docs/screenshots/phone-gen-result.png" width="200" alt="Gen result">
+<img src="docs/screenshots/phone-edit-fix-buttons-mask.png" width="200" alt="Edit fix buttons + mask">
+<img src="docs/screenshots/phone-edit-from-gen.png" width="200" alt="Edit from Gen">
+<img src="docs/screenshots/phone-analyze-pose.png" width="200" alt="Analyze">
+<img src="docs/screenshots/phone-desktop-restart-apps.png" width="200" alt="Restart PC apps">
+<img src="docs/screenshots/phone-restart-busy-dialog.png" width="200" alt="Restart busy warning">
+<img src="docs/screenshots/phone-monitor.png" width="200" alt="Monitor">
+</p>
 
 ## Requirements
 - Windows 11, Intel Core Ultra (Meteor Lake or newer) with NPU driver installed
