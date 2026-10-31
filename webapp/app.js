@@ -1,7 +1,7 @@
 // NpuStudio Companion web UI. Served by the desktop at /app; the Android shell (window.NpuShell) is optional.
 "use strict";
 const $ = id => document.getElementById(id);
-const UI_VERSION = "1.6.8";
+const UI_VERSION = "1.6.9";
 const Shell = window.NpuShell || null;
 const shellVersion = Shell && Shell.shellVersion ? Number(Shell.shellVersion()) : 0;
 
@@ -116,10 +116,10 @@ function savedLine(r) {
 }
 // In-page dialogs: Android WebView silently drops window.alert/confirm, so never use them.
 function notice(q) { return ask(q, true); }
-function ask(q, okOnly) {
+function ask(q, okOnly, yes, no) {
   return new Promise(res => {
     $("dlgQ").textContent = q; $("dlg").classList.remove("hidden");
-    $("dlgNo").classList.toggle("hidden", !!okOnly); $("dlgYes").textContent = okOnly ? "OK" : "Yes";
+    $("dlgNo").classList.toggle("hidden", !!okOnly); $("dlgYes").textContent = okOnly ? "OK" : (yes || "Yes"); $("dlgNo").textContent = no || "No";
     const done = v => { $("dlg").classList.add("hidden"); res(v); };
     $("dlgYes").onclick = () => done(true); $("dlgNo").onclick = () => done(false);
   });
@@ -565,6 +565,7 @@ async function monitor() {
 
 // ---------- desktop status ----------
 async function desk() {
+  pcsShow();
   try {
     const [i, hl] = await Promise.all([api("info"), api("health")]);
     $("deskBox").innerHTML = `<div class="kv"><b>PC</b><span>${esc(i.name)}</span><b>Home address</b><span>${esc(i.lan)}:${i.port}</span>
@@ -575,7 +576,41 @@ async function desk() {
     $("deskBox").querySelectorAll("button[data-id]").forEach(b => b.onclick = async () => { await api(`jobs/${b.dataset.id}/cancel`, {}); desk(); });
   } catch (e) { $("deskBox").innerHTML = `<p class="err">${esc(e.message)}</p>`; }
 }
-$("deskRe").onclick = desk;
+$("deskRe").onclick = () => { desk(); pcsShow(); };
+// ---------- restart the NpuStudio PC apps ----------
+async function pcsShow(msg) {
+  const box = $("pcsBox"); if (!box) return;
+  try {
+    const r = await api("pcs");
+    box.innerHTML = (r.pcs || []).map(p => `<div class="row"><span class="grow"><b>${esc(p.name)}</b> ${p.id === "laptop" ? "(laptop)" : "(desktop)"}<br><span class="small muted">${p.online ? "🟢 app open" : p.online === null ? "🟡 needs one manual restart" : "⚪ app closed"} · v${esc(p.ver || "?")}${p.busy && p.busy.length ? " · busy: " + esc(p.busy.join(", ")) : ""}${p.note && !p.online ? " · " + esc(p.note) : ""}</span></span>
+      <button class="ghost" data-pc="${p.id}" ${p.online ? "" : "disabled"}>↻ Restart</button></div>`).join("") + (msg ? `<p class="small">${esc(msg)}</p>` : "");
+    box.querySelectorAll("button[data-pc]").forEach(b => b.onclick = () => pcRestart(b.dataset.pc, (r.pcs || []).find(p => p.id === b.dataset.pc)));
+  } catch (e) { box.innerHTML = `<p class="err">${esc(e.message)}</p>`; }
+}
+async function pcRestart(id, before) {
+  const name = before ? before.name : id;
+  if (!await ask(`Restart the NpuStudio app on ${name}? (Only the app, not the PC.)`, false, "↻ Restart", "Cancel")) return;
+  let r;
+  try { r = await api("pcs/restart", { id }); }
+  catch (e) {
+    if (e.status !== 409) return ask("Restart failed: " + e.message, true);
+    let d = {}; try { d = await (await fetch("/api/v1/pcs/restart", { method: "POST", headers: { "X-Key": key(), "Content-Type": "application/json" }, body: JSON.stringify({ id, dry_run: true }) })).json(); } catch (x) {}
+    if (!d.busy) return ask(e.message, true);
+    if (!await ask(`${name} is busy: ${d.busy.join(", ")}. Restarting stops it.`, false, "Restart anyway", "Cancel")) return;
+    try { r = await api("pcs/restart", { id, force: true }); } catch (e2) { return ask("Restart failed: " + e2.message, true); }
+  }
+  const t0 = (r && r.started_before) || (before && before.started), end = Date.now() + 120000;
+  $("pcsBox").insertAdjacentHTML("beforeend", `<p class="small" id="pcsWait">Restarting ${esc(name)}…</p>`);
+  while (Date.now() < end) {
+    await sleep(2500);
+    try {
+      const p = ((await api("pcs")).pcs || []).find(x => x.id === id);
+      if (p && p.online && p.started && p.started !== t0) return pcsShow(`✓ ${name} restarted (v${p.ver || "?"})`);
+      const w = $("pcsWait"); if (w) w.textContent = `Restarting ${name}… waiting for the app`;
+    } catch (e) { const w = $("pcsWait"); if (w) w.textContent = "Reconnecting…"; }
+  }
+  pcsShow(`${name} hasn't come back after 2 minutes - check the PC.`);
+}
 (function bgSetup() {          // shell v3: the phone's background link (Find my phone)
   if (!(Shell && Shell.getBackground)) return;
   $("bgBox").classList.remove("hidden");

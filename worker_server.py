@@ -500,12 +500,54 @@ def laptop_action(a):
                                headers={"X-Key": c["key"], "Content-Type": "application/json"}, method="POST")
     return json.load(urllib.request.urlopen(r, timeout=30)).get("result", "")
 
+# ---- restart the NpuStudio PC apps from the phone (never the PC itself) ----
+APP_ST = os.path.join(MD, "app_status.json"); APP_REQ = os.path.join(MD, "restart_req.json")
+def pcapp_status():
+    """This PC's NpuStudio app, from the heartbeat it writes every 2 s."""
+    try: a = json.load(open(APP_ST))
+    except Exception: a = {}
+    on = bool(a) and time.time() - a.get("t", 0) < 8
+    return {"name": socket.gethostname(), "online": on, "ver": a.get("ver"), "started": a.get("started"), "busy": (a.get("jobs") or []) if on else [], "server_jobs": _busy[0]}
+def pcapp_restart(a):
+    """-> (http code, body). Busy unless force; dry_run only checks."""
+    st = pcapp_status()
+    if not st["online"]: return 409, {"error": "The NpuStudio app isn't open on " + st["name"], "offline": True}
+    busy = list(st["busy"]) + (["a server job"] if _busy[0] else [])
+    if busy and not a.get("force"): return 409, {"busy": busy, "error": ", ".join(busy) + " still running"}
+    if a.get("dry_run"): return 200, {"ok": True, "dry_run": True, "would_restart": st["name"], "busy": busy}
+    json.dump({"t": time.time(), "force": True}, open(APP_REQ, "w")); logging.info("phone asked to restart the NpuStudio app (busy: %s)", busy)
+    return 200, {"ok": True, "started_before": st["started"]}
+def _laptop_req(path, body=None, timeout=4):
+    import remote; c = remote.cfg()
+    if not c.get("host"): raise RuntimeError("the laptop isn't linked")
+    r = urllib.request.Request(f"http://{c['host']}:{c.get('port', 47860)}/api/v1/" + path, data=None if body is None else json.dumps(body).encode(),
+                               headers={"X-Key": c["key"], "Content-Type": "application/json"}, method="GET" if body is None else "POST")
+    try: return 200, json.load(urllib.request.urlopen(r, timeout=timeout))
+    except urllib.error.HTTPError as e:
+        if e.code == 404: return 409, {"error": "The laptop's NpuStudio is one version behind: restart it once on the laptop to enable this.", "old": True}
+        try: return e.code, json.load(e)
+        except Exception: return e.code, {"error": f"laptop HTTP {e.code}"}
+def pcs():
+    d = {"id": "desktop", **pcapp_status()}; out = [d]
+    try:
+        lp = json.load(open(os.path.join(MD, "laptop.json"))); L = {"id": "laptop", "name": lp.get("name") or "Laptop", "online": False}
+        try:
+            code, b = _laptop_req("pcapp", timeout=3)
+            if code == 200: L.update({k: b.get(k) for k in ("online", "ver", "started", "busy")}); L["name"] = b.get("name") or L["name"]
+            else: L.update(note=b.get("error")); L["online"] = None if b.get("old") else False
+        except Exception: L["note"] = "not reachable"
+        out.append(L)
+    except Exception: pass
+    return out
+
 def api_get(h, p):
     if p == ["health"]: return h._send(200, gpu_info())
     if p == ["phone", "poll"]:
         import urllib.parse; return phone_poll(h, urllib.parse.parse_qs(h.path.partition("?")[2]))
     if p == ["phone", "status"]: return h._send(200, phone_status())
     if p == ["devices"]: return h._send(200, {"devices": devices()})
+    if p == ["pcapp"]: return h._send(200, pcapp_status())
+    if p == ["pcs"]: return h._send(200, {"pcs": [] if SHARE else pcs()})
     if p == ["info"]:
         c = config(); v = {}
         try: v = json.load(open(os.path.join(WEB, "version.json")))
@@ -533,6 +575,12 @@ def api_get(h, p):
 def api_post(h, p, data):
     try: a = json.loads(data or b"{}")
     except Exception: return h._send(400, {"error": "body must be JSON"})
+    if p == ["pcapp", "restart"]: return h._send(*pcapp_restart(a))
+    if p == ["pcs", "restart"] and not SHARE:
+        if a.get("id") == "laptop":
+            try: return h._send(*_laptop_req("pcapp/restart", {k: a.get(k) for k in ("force", "dry_run")}, timeout=6))
+            except Exception as e: return h._send(502, {"error": f"Can't reach the laptop: {e}"})
+        return h._send(*pcapp_restart(a))
     if p == ["phone", "command"]:
         import phonelink
         if a.get("name") not in phonelink.CMDS: return h._send(400, {"error": "allowed: " + ", ".join(sorted(phonelink.CMDS))})

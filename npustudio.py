@@ -1008,6 +1008,23 @@ def gui():
     rm_.add_command(label="Restart NpuStudio", command=do_restart)
     if remote.role() != "laptop": rm_.add_command(label="Restart NpuStudio + NpuStudio-Server", command=lambda: do_restart(server_too=True))
     rstm.pack(side="right", padx=4)
+    _app_t0 = time.time()
+    def app_beat():
+        """Heartbeat for the phone's Restart buttons (models/app_status.json) + pick up a restart request from the server."""
+        import busy
+        try:
+            md = os.path.join(APP, "models"); ver = "?"
+            try: ver = json.load(open(os.path.join(APP, "webapp", "version.json"))).get("ui_version", "?")
+            except Exception: pass
+            json.dump({"t": time.time(), "pid": os.getpid(), "started": _app_t0, "ver": ver, "jobs": busy.running()}, open(os.path.join(md, "app_status.json"), "w"))
+            rq = os.path.join(md, "restart_req.json")
+            if os.path.exists(rq):
+                r = json.load(open(rq)); os.remove(rq)
+                if r.get("t", 0) > _app_t0 and time.time() - r.get("t", 0) < 60:
+                    logging.info("Restart requested from the phone"); return do_restart(force=True)
+        except Exception: logging.exception("app heartbeat")
+        root.after(2000, app_beat)
+    root.after(1500, app_beat)
     import outputs
     def pick_outputs():
         from tkinter import filedialog
