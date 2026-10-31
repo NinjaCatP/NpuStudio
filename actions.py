@@ -12,7 +12,7 @@ SETTINGS = {"wifi": "network-wifi", "wi-fi": "network-wifi", "network": "network
             "touchpad": "devices-touchpad", "keyboard": "typing", "privacy": "privacy", "storage": "storagesense",
             "date": "dateandtime", "time": "dateandtime", "language": "regionlanguage", "accounts": "yourinfo",
             "printers": "printers", "night light": "nightlight", "about": "about", "vpn": "network-vpn",
-            "windows updates": "windowsupdate", "check for updates": "windowsupdate", "default apps": "defaultapps",
+            "windows updates": "windowsupdate", "windows update check": "windowsupdate-action", "check for updates": "windowsupdate", "default apps": "defaultapps",
             "wireless": "network-wifi", "internet": "network", "ethernet": "network-ethernet", "airplane mode": "network-airplanemode",
             "hotspot": "network-mobilehotspot", "mobile hotspot": "network-mobilehotspot", "proxy": "network-proxy",
             "monitor": "display", "resolution": "display", "speakers": "sound", "microphone": "privacy-microphone", "mic": "privacy-microphone",
@@ -62,7 +62,6 @@ def app_index():
                  os.path.join(os.environ.get("APPDATA", ""), r"Microsoft\Windows\Start Menu\Programs")]:
         for p in glob.glob(os.path.join(root, "**", "*.lnk"), recursive=True):
             n = os.path.splitext(os.path.basename(p))[0]
-            if re.search(r"uninstall|readme|help|documentation|website", n, re.I): continue
             idx.setdefault(n.lower(), ("lnk", p, n))
     try:
         out = subprocess.run(["powershell", "-NoProfile", "-Command",
@@ -75,11 +74,24 @@ def app_index():
     except Exception: logging.exception("Get-StartApps")
     _apps = idx; return idx
 
+HELPER = re.compile(r"check for updates?|\bupdater?\b|uninstall|readme|read me|\bhelp\b|documentation|website|"
+                    r"configure java|\bjava\b|release notes|license|support|about ", re.I)
+def _vendor_named(k, e, q):
+    """Vendor helper shortcuts (Java 'Check For Updates', 'Uninstall X'...) only count when the user names the vendor."""
+    words = set(re.findall(r"[a-z0-9]{3,}", q))
+    vend = set(re.findall(r"[a-z0-9]{3,}", HELPER.sub(" ", k)))
+    if e[0] == "lnk": vend |= set(re.findall(r"[a-z0-9]{3,}", os.path.basename(os.path.dirname(str(e[1]).replace("\\", "/"))).lower())) - {"programs"}
+    if "java" in k: vend.add("java")
+    vend -= {"check", "for", "updates", "update", "the", "and"}
+    return bool(vend & words)
 def find_app(name):
-    idx = app_index(); q = name.lower().strip()
+    idx0 = app_index(); q = name.lower().strip()
+    idx = {k: e for k, e in idx0.items() if not HELPER.search(k) or _vendor_named(k, e, q)}
     if q in idx: return idx[q]
     starts = [k for k in idx if k.startswith(q)] or [k for k in idx if re.search(r"\b" + re.escape(q), k)]
     if starts: return idx[min(starts, key=len)]
+    qw = set(q.split()); cover = [k for k in idx if set(k.split()) <= qw]
+    if cover: return idx[max(cover, key=len)]
     m = difflib.get_close_matches(q, list(idx), n=1, cutoff=0.6)
     return idx[m[0]] if m else None
 
@@ -179,6 +191,13 @@ def route(text):
     t = text.lower().strip().rstrip(".!?")
     t = re.sub(r"^(please |can you |could you |hey |would you )+", "", t)
     t = re.sub(r"\s+(please|for me|now)$", "", t)
+    if re.search(r"\b(check|scan|look|search) for (new |windows |any )*updates?\b|\b(update|patch) (windows|my (pc|computer|laptop)|the (pc|computer|laptop))\b"
+                 r"|\b(install|download|get|run) (the |any |new |windows |pending )*updates?\b|\bwindows update\b.*\b(check|scan|install|run|update now)\b", t):
+        return {"name": "settings", "args": {"page": "windows update check"}}
+    if " and " in t:       # compound: prefer the more specific, non-app-launch part ("open settings and turn on bluetooth")
+        parts = [route(p) for p in t.split(" and ") if p.strip()]
+        spec = [p for p in parts if p and p["name"] != "open_app"]
+        if spec: return spec[-1]
     r = _route_more(t)
     if r: return r
     if re.fullmatch(r"(check|look|scan) for (windows )?updates", t): return {"name": "settings", "args": {"page": "windows update"}}
@@ -346,7 +365,12 @@ def _folder(g, _):
 def _settings(g, _):
     p = str(g.get("page", "")).lower().strip()
     page = SETTINGS.get(p, p.replace(" ", "") if re.fullmatch(r"[a-z\- ]*", p) else "")
-    os.startfile("ms-settings:" + page); return f"Opened {p or 'Windows'} settings."
+    os.startfile("ms-settings:" + page)
+    if page == "windowsupdate-action":    # opens Windows Update and starts a scan; UsoClient as a backup (no admin needed)
+        try: subprocess.Popen(["UsoClient.exe", "StartInteractiveScan"], creationflags=NOWIN)
+        except Exception: logging.exception("UsoClient")
+        return "Opened Windows Update and started checking for updates."
+    return f"Opened {p or 'Windows'} settings."
 
 def _volume(g, _):
     lv = int(g.get("level", 50)); set_volume(lv, mute=False if lv > 0 else None); return f"Volume set to {max(0, min(100, lv))}%."
