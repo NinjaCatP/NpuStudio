@@ -74,6 +74,8 @@ class AI:
         if p != self.pref: self.m = {}; self.pref = p
         return devices
     def remove_bg(self, im, status=None):
+        import remote
+        if remote.active(): r, d = remote.call("remove_bg", im, status=status); return r, "Desktop PC " + str(d)
         with self.lock:
             dv = self._check()
             if "isnet" not in self.m: self.m["isnet"] = OVModel("isnet", [1, 3, 1024, 1024], status, devs=dv.plan("isnet"), outputs=[0])
@@ -101,6 +103,8 @@ class AI:
         out.paste(res, box[:2]); return out
 
     def erase(self, im, mask, status=None):
+        import remote
+        if remote.active(): r, d = remote.call("erase", im, mask, status=status); return r, "Desktop PC " + str(d)
         with self.lock:
             dv = self._check()
             if "lama" not in self.m: self.m["lama"] = OVModel("lama", {"image": [1, 3, 512, 512], "mask": [1, 1, 512, 512]}, status, devs=dv.plan("lama"),
@@ -121,7 +125,10 @@ class AI:
             return self._paste(im, patch, mfull, box), om.device
 
     def change(self, im, mask, prompt, steps=30, strength=1.0, seed=1, progress=None, status=None, guidance=7.5, negative=None, grow=9):
-        import openvino_genai as og, openvino as ov
+        import openvino_genai as og, openvino as ov, remote
+        if remote.active():
+            r, d = remote.call("change", im, mask, prompt, steps=steps, strength=strength, seed=seed, guidance=guidance, negative=negative, grow=grow, progress=progress, status=status)
+            return r, ("Desktop PC",) * 3
         with self.lock:
             dv = self._check(); labs = dv.plan("inpaint")
             if not labs: raise RuntimeError(dv.unsupported("AI change (inpaint)"))

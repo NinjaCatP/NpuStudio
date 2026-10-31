@@ -43,6 +43,12 @@ class Upscaler:
         try: self.core.set_property({"CACHE_DIR": os.path.join(APP, "models", "cache")})
         except Exception: pass
         self.err = []; self.workers = []  # (label, infer_fn)
+        import remote; self.remote = None; rm = remote.mode()
+        if rm and remote.active():
+            if rm == "Desktop PC":   # whole picture goes to the desktop, which tiles it on its own fastest chip
+                self.remote = "whole"; self.device = "Desktop PC"; self.th = self.tw = 256; self.m = 16
+                self.lock = threading.Lock(); logging.info("Upscaler %s on Desktop PC", name); return
+            self.remote = "split"
         model = self.core.read_model(os.path.join(APP, "models", fn))
         feat = "upscale_" + self.kind; labels = devices.plan(feat, pref)
         if not labels: raise RuntimeError(devices.unsupported("Upscale", pref))
@@ -59,8 +65,9 @@ class Upscaler:
                 if not many: break
             except Exception as e:
                 self.err.append(f"{lab}: {e}"); logging.warning("upscaler %s on %s failed: %s", name, lab, e)
+        self.share = 0.6   # Both machines: part of the picture the desktop does (learned from each run's timings)
         if not self.workers: raise RuntimeError("No device worked: " + "; ".join(self.err))
-        self.device = "+".join(l for l, _ in self.workers)
+        self.device = "+".join(l for l, _ in self.workers) + ("+Desktop PC" if self.remote == "split" else "")
         if self.kind == "fast": self.th, self.tw, self.m = LH, LW, 8
         else: self.th = self.tw = 256; self.m = 16
         self.lock = threading.Lock(); logging.info("Upscaler %s on %s", name, self.device)
@@ -130,7 +137,44 @@ class Upscaler:
         return out
 
     def upscale_to(self, img, scale, progress=None):
+        if self.remote == "whole":
+            import remote
+            if remote.online(): return remote.call("upscale", self.name, img.convert("RGB"), int(scale), progress=progress)
+            raise RuntimeError("Desktop PC went offline - pick another Device or start NpuStudio-Server on the desktop")
+        if self.remote == "split":
+            import remote
+            if remote.online() and img.size[1] >= 64: return self._split(img, scale, progress)
         with self.lock: return self._upscale_to(img, scale, progress)
+
+    def _split(self, img, scale, progress=None):
+        """Both machines: the desktop upscales the top part (one request), this laptop the bottom part, at the same time.
+        Parts overlap by 16 px and are cut in the middle of the overlap, so there is no seam."""
+        import remote
+        img = img.convert("RGB"); W, H = img.size; ov = 16
+        cut = max(ov, min(H - ov, int(H * self.share)))
+        top = img.crop((0, 0, W, min(H, cut + ov))); bot = img.crop((0, max(0, cut - ov), W, H))
+        res = {}; pr = {"r": (0, 1), "l": (0, 1)}; t0 = time.time()
+        def rep_():
+            if progress:
+                (a, b), (c, d) = pr["r"], pr["l"]; progress(int(1000 * (a / b * self.share + c / d * (1 - self.share))), 1000)
+        def rem():
+            try: res["r"] = remote.call("upscale", self.name, top, int(scale), progress=lambda k, n: (pr.__setitem__("r", (k, n)), rep_()))
+            except Exception as e: res["re"] = e
+            res["rt"] = time.time() - t0
+        th = threading.Thread(target=rem, daemon=True); th.start()
+        with self.lock: lo = self._upscale_to(bot, scale, lambda k, n: (pr.__setitem__("l", (k, n)), rep_()))
+        lt = time.time() - t0; th.join()
+        if "re" in res:   # desktop failed mid-job: do its part here
+            logging.warning("Both machines: desktop part failed (%s), finishing locally", res["re"])
+            with self.lock: res["r"] = self._upscale_to(top, scale); res["rt"] = 1e9
+        out = Image.new("RGB", (W * scale, H * scale))
+        out.paste(res["r"].crop((0, 0, W * scale, cut * scale)), (0, 0))
+        out.paste(lo.crop((0, (cut - max(0, cut - ov)) * scale, W * scale, lo.size[1])), (0, cut * scale))
+        # learn the split: each side's speed = its rows / its time
+        rs, ls = cut / max(res["rt"], 1e-3), (H - cut) / max(lt, 1e-3); self.share = min(0.9, max(0.1, 0.5 * self.share + 0.5 * rs / (rs + ls)))
+        self.tiles_by = {"Desktop PC rows": cut, "local rows": H - cut, "desktop s": round(res["rt"], 2), "local s": round(lt, 2)}
+        logging.info("Both machines upscale %s: desktop %d rows %.1fs, local %d rows %.1fs, next share %.2f", img.size, cut, res["rt"], H - cut, lt, self.share)
+        return out
 
     def _upscale_to(self, img, scale, progress=None):
         passes = plan(scale); W, H = img.size; sizes = []; w, h = W, H
@@ -452,6 +496,7 @@ def gui():
     if root is None: root = tk.Tk()
     root.report_callback_exception = lambda et, ev, tb: logging.error("UI callback error", exc_info=(et, ev, tb))
     root.title("NpuStudio")
+    import remote; remote.install()
     sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
     root.geometry(f"{int(sw*0.6)}x{int(sh*0.65)}+{int(sw*0.2)}+{int(sh*0.15)}")
     topbar = ttk.Frame(root); topbar.pack(fill="x", side="top", padx=6, pady=(4, 0))
@@ -605,6 +650,21 @@ def gui():
             v = tk.StringVar(master=w, value=c); tk.Label(f, textvariable=v, fg=COL[c][0], bg="#111", anchor="w", justify="left", font=("Segoe UI", 11, "bold")).pack(fill="x")
             cv = tk.Canvas(f, bg="#111", highlightthickness=0, height=80); cv.pack(fill="both", expand=True)
             panes[c] = (v, cv, [0.0] * 120)
+        dsk = tk.StringVar(master=w, value=""); tk.Label(w, textvariable=dsk, fg="#76b900", bg="#111", anchor="w", justify="left", font=("Segoe UI", 11, "bold")).pack(fill="x", padx=10, pady=4)
+        def dpoll():
+            if not w.winfo_exists(): return
+            def q():
+                if not remote.configured(): t = ""
+                else:
+                    i = remote.health(max_age=1.5)
+                    if not i: t = "Desktop PC: offline"
+                    else:
+                        DEG = "{}\u00b0C"; g = lambda k, f="{}": f.format(i[k]) if i.get(k) is not None else "N/A"
+                        t = (f"Desktop PC ({i.get('gpu', 'N/A')}): {g('use', '{}%')}   memory {g('vram_used', '{:,} MB')} / {g('vram_total', '{:,} MB')}\n"
+                             f"power {g('watts', '{} W')}   temp {g('temp', DEG)}   jobs running {i.get('busy', 0)}")
+                root.after(0, dsk.set, t)
+            threading.Thread(target=q, daemon=True).start(); w.after(2000, dpoll)
+        dpoll()
         if cnt: top.set("Updates every second. Power from real counters only: " + (", ".join(cnt.energy_instances()) or "no Energy Meter counters"))
         def tick():
             if not w.winfo_exists(): return
@@ -651,15 +711,37 @@ def gui():
     ttk.Button(bar, text="Send to Edit", command=lambda: (st["out"] or st["img"]) is not None and to_edit(st["out"] or st["img"])).pack(side="left", padx=4)
     ttk.Button(topbar, text="Chip Monitor", command=open_monitor).pack(side="right")
     import devices
-    devv = tk.StringVar(value=devices.get())
+    devv = tk.StringVar(value=devices.get_raw())
+    deskv = tk.StringVar(value="")
+    def pair():
+        from tkinter import simpledialog
+        c = remote.cfg()
+        h = simpledialog.askstring("Desktop PC", "Desktop PC address (shown in the NpuStudio-Server window):", initialvalue=c.get("host", ""), parent=root)
+        if not h: return False
+        k = simpledialog.askstring("Desktop PC", "Pairing key (shown in the NpuStudio-Server window):", initialvalue=c.get("key", ""), parent=root)
+        if not k: return False
+        remote.save(h, k); return True
+    def desk_poll():
+        def w():
+            i = remote.health(force=True) if remote.configured() else None
+            txt = "" if not remote.configured() else (f"Desktop PC: online ({i.get('gpu', '?')})" if i else "Desktop PC: offline")
+            root.after(0, deskv.set, txt)
+        threading.Thread(target=w, daemon=True).start(); root.after(5000, desk_poll)
     def dev_changed(_=None):
+        if devv.get() in devices.REMOTE:
+            if not remote.configured() and not pair(): devv.set(devices.get_raw()); return
+            if not remote.health(force=True):
+                status.set("Desktop PC is offline - start NpuStudio-Server.bat on the desktop. Jobs will run on this laptop until it is online.")
         devices.set(devv.get())
         with up_lock: st["ups"].clear()
         st["up"] = None; root.after(50, switch_model)
         b = devices.bench(); tip = ", ".join(f"{k}: " + "/".join(f"{d} {v:.2f}s" for d, v in r.items() if isinstance(v, (int, float))) for k, r in list(b.items())[:2])
         status.set(f"Device: {devv.get()} - AI features will use it from the next job." + (f"  (benchmarks: {tip})" if tip else ""))
-    dcb = ttk.Combobox(topbar, textvariable=devv, values=devices.choices(), width=10, state="readonly"); dcb.pack(side="right", padx=4)
+    dcb = ttk.Combobox(topbar, textvariable=devv, values=devices.choices(), width=14, state="readonly"); dcb.pack(side="right", padx=4)
     dcb.bind("<<ComboboxSelected>>", dev_changed); ttk.Label(topbar, text="Device").pack(side="right")
+    ttk.Label(topbar, textvariable=deskv, foreground="#0068b5").pack(side="right", padx=8)
+    ttk.Button(topbar, text="Pair desktop...", command=lambda: (pair(), remote.health(force=True))).pack(side="left")
+    root.after(1000, desk_poll)
     if "--monitor" in args: root.after(300, open_monitor)
     if "--size" in args: sizev.set(args[args.index("--size") + 1] + "x"); args = [a for a in args if a != args[args.index("--size") + 1]]
     if "--sharp" in args: modelv.set(list(MODELS)[1]); switch_model()

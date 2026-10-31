@@ -174,3 +174,14 @@ NOTES / LIMITS
 * The NPU can't run LaMa erase or the inpainting step, and runs CLIPSeg poorly, so those use Intel Arc, NVIDIA or CPU.
 * NVIDIA through OpenVINO is slow for some models; NpuStudio uses CUDA (torch) for NVIDIA where it matters.
 * Problems? Look at error.log in this folder.
+
+DESKTOP PC LINK (laptop + desktop working together)
+- Device picker has two more choices: "Desktop PC" and "Both machines".
+  - Desktop PC: Image Gen, upscaling, AI Change (redraw, pose, recolor), background removal and AI erase run on the desktop's RTX 4070 (12 GB); the picture is sent over the home network and the result comes back with progress.
+  - Both machines: upscale splits the image by rows (desktop takes the larger, learned share; laptop does the rest), with fallback to local; generation and AI Change go to the desktop.
+  - If the desktop is offline, jobs run on the laptop and the status line says so.
+- "Pair desktop..." button: enter the desktop's address and pairing key once (shown in the NpuStudio-Server window).
+- Top bar shows "Desktop PC: online/offline"; the Chip Monitor shows the desktop GPU's use, memory, power and temperature (N/A when unreadable).
+- On the desktop: NpuStudio-Server.bat starts the worker (home network + Tailscale only, pairing key required). AllowLaptop-Firewall.ps1 adds a private-network-only firewall rule.
+- API.md documents the worker API for other apps (phone app): health, chip monitor, image gen, upscale, edit / AI Change, background removal, erase, and chat with PC actions (Yes/No confirm on the remote side).
+- Models stay on each machine; only pictures and settings travel over the network.

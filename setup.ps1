@@ -53,5 +53,8 @@ if (!(Test-Path "$app\models\human-parse\model.xml")) { Log 'Converting body-par
 # Device benchmark (fills models\devbench.json so Device=Auto picks the fastest):
 if (!(Test-Path "$app\models\devbench.json")) { Log 'Benchmarking devices...'; & "$app\venv\Scripts\python.exe" "$app\devbench.py" 2>&1 | Tee-Object -FilePath $log -Append }
 if (!(Test-Path "$app\venv\Scripts\pythonw.exe")) { Log 'SETUP FAILED: python missing'; exit 1 }
+# Desktop link: NpuStudio-Server.bat runs worker_server.py so a laptop can send heavy jobs here (LAN only, pairing key in
+# models\remote_server.json). AllowLaptop-Firewall.ps1 adds a Private-network-only firewall rule for it. No NPU needed:
+# without an NPU the device picker only offers the chips that exist (NVIDIA / Intel GPU / CPU).
 'ok' | Set-Content "$app\setup.done"
 Log "Setup finished $(Get-Date)"

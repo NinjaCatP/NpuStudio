@@ -2,7 +2,8 @@
 import os, json, logging
 APP = os.path.dirname(os.path.abspath(__file__)); MD = os.path.join(APP, "models")
 PREF = os.path.join(MD, "device.json"); BENCH = os.path.join(MD, "devbench.json")
-CHOICES = ["Auto", "NPU", "Intel Arc", "NVIDIA", "All"]
+CHOICES = ["Auto", "NPU", "Intel Arc", "NVIDIA", "All", "Desktop PC", "Both machines"]
+REMOTE = ("Desktop PC", "Both machines")  # handled by remote.py; local chips then run as Auto
 # which hardware each feature can use (from testing on this laptop)
 #  key "cuda" = NVIDIA through torch/diffusers; OV names are mapped at runtime.
 FEATURE_HW = {
@@ -41,12 +42,17 @@ def present():
     m = ov_map(); return [c for c in ("NPU", "Intel Arc", "NVIDIA") if c in m]
 
 def choices():
-    p = present(); return ["Auto"] + p + (["All"] if len(p) > 1 else [])
+    p = present(); return ["Auto"] + p + (["All"] if len(p) > 1 else []) + list(REMOTE)
 
-def get():
+def get_raw():
+    """The picker value, including Desktop PC / Both machines."""
     try: v = json.load(open(PREF)).get("device", "Auto")
     except Exception: v = "Auto"
     return v if v in choices() else "Auto"
+
+def get():
+    """Local device preference. With Desktop PC / Both machines picked, local work runs as Auto."""
+    v = get_raw(); return "Auto" if v in REMOTE else v
 
 def set(v):
     os.makedirs(MD, exist_ok=True); json.dump({"device": v}, open(PREF, "w"))
@@ -62,7 +68,9 @@ def _speed(feature, label):
 def plan(feature, pref=None):
     """Ordered list of hardware labels to use. Single choice is respected exactly (empty list => unsupported).
     Auto => fastest first (benchmarks), with fallbacks. All => every working device (caller may run them in parallel)."""
-    pref = pref or get(); ok = [h for h in FEATURE_HW.get(feature, ["CPU"]) if h in ov_map() or h == "CPU"]
+    pref = pref or get()
+    if pref in REMOTE: pref = "Auto"
+    ok = [h for h in FEATURE_HW.get(feature, ["CPU"]) if h in ov_map() or h == "CPU"]
     if pref in ("NPU", "Intel Arc", "NVIDIA"):
         return [pref] if pref in ok else []
     order = sorted(ok, key=lambda h: (_speed(feature, h), ["NVIDIA", "Intel Arc", "NPU", "CPU"].index(h)))

@@ -33,6 +33,9 @@ class ImageGen:
     def build(self, w, h, status=None):
         import devices
         gs = 8.0; self.pref = devices.get(); self.cuda = False
+        import remote
+        if remote.active():   # Desktop PC / Both machines: cudaeng.gen is routed to the desktop by remote.install()
+            self.cuda = True; self.devs = ("Desktop PC",) * 3; self.size = (w, h); return
         labs = devices.plan("gen")
         if not labs: raise RuntimeError(devices.unsupported("Image Gen"))
         if labs[0] == "NVIDIA":
@@ -60,7 +63,8 @@ class ImageGen:
 
     def generate(self, prompt, neg="", steps=4, seed=42, w=512, h=512, progress=None, cancel=None):
         import devices
-        if (w, h) != self.size or self.pref != devices.get(): self.build(w, h)
+        import remote
+        if (w, h) != self.size or self.pref != devices.get() or (self.devs and self.devs[0] == "Desktop PC") != remote.active(): self.build(w, h)
         if self.cuda:
             import cudaeng; return cudaeng.gen(prompt, w, h, int(steps), int(seed), progress)
         def cb(step, n, latent):
