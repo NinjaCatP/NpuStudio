@@ -237,3 +237,6 @@ Face and eye detailer (v1.6.2)
 - Body reshaping (bigger/smaller/longer… on body parts) is refused; size words stripped from body prompts.
 - Fix body button (PC + phone): arms, hands, legs, feet only.
 - Edit mask: Add / Erase brush, size, Undo stroke on top of the auto-mask (PC dialog preview; phone "Show auto-mask").
+- Clothing redraws: opaque fabric / fully clothed prompt, see-through/sheer/smeared negatives; results with a translucent or smeared wash are rejected (original kept).
+- Clothing/limb/object masks never touch the face (detected face boxes are cut out) unless the request is about the face.
+- Removing clothing or making it see-through is refused.

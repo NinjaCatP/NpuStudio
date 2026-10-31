@@ -540,6 +540,11 @@ RESHAPE_PARTS = (r"(?i)\b(breasts?|boobs?|bust|chest|tits?|cleavage|butt|buttock
 def reshape_block(instr):
     """Body reshaping is not supported: size/shape words aimed at a body part (or the body) -> refusal text, else None."""
     s = instr or ""
+    if re.search(r"(?i)\b(nude|naked|topless|bottomless|undress\w*|see[- ]?through|lingerie|underwear|bra|panties|bikini)\b", s) or \
+       re.search(r"(?i)\b(transparent|sheer|translucent)\b.*\b(cloth\w*|outfit|dress|shirt|top|skirt|pants|jeans|shorts|blouse|jacket|coat|uniform|swimsuit|garment|apparel)\b|\b(cloth\w*|outfit|dress|shirt|top|skirt|pants|jeans|shorts|blouse|jacket|coat|uniform|swimsuit|garment|apparel)\b.*\b(transparent|sheer|translucent)\b", s) or \
+       re.search(r"(?i)\b(remove|erase|delete|take off|strip)\s+(?:all\s+|her\s+|his\s+|their\s+|the\s+|of\s+)*(cloth\w*|outfit|dress|shirt|top|skirt|pants|jeans|shorts|blouse|jacket|coat|uniform|swimsuit|garment|apparel)\b", s):
+        return ("Removing clothing or making it see-through isn't supported. You can change an outfit to a different "
+                "(fully clothed) one, e.g. 'change the dress to a red sweater dress'. Nothing was changed.")
     if re.search(SIZE_WORDS, s) and re.search(RESHAPE_PARTS, s):
         return ("Body reshaping isn't supported - NpuStudio keeps the silhouette and proportions as they are. "
                 "You can change clothes, colours, the background, or use 'fix arms/legs/hands' / 'fix eyes' for detail repair. Nothing was changed.")

@@ -234,6 +234,7 @@ class Changer:
             return r, ("NVIDIA",), how, f"(detailer: {_fw})"
         import devices
         tgt, rep, kind = parse(instr)
+        mask = protect_face(im, mask, instr)
         if kind == "remove":
             r, d = ai.erase(im, mask, status); return r, d, "Method: erase (LaMa)", "(erase)"
         cuda_ok = False
@@ -268,6 +269,7 @@ class Changer:
                 hs = bg_mask(ai, im, hard)
                 if hs: hard, soft = hs
         if not hard.getbbox(): hard, soft = mask.convert("L"), mask.convert("L")
+        hard = protect_face(im, hard, instr); soft = Image.fromarray(np.minimum(np.asarray(soft.convert("L")), np.asarray(hard.filter(__import__("PIL.ImageFilter").ImageFilter.MaxFilter(5)))))
         ctl = control_mode(tgt, rep)
         hair_short = bool(re.fullmatch(r"(?i)\s*hair\s*", tgt or "")) and bool(re.search(r"\b(short|bob|pixie|buzz|bald)\b", rep or "", re.I))
         cn_ok = False
@@ -330,6 +332,8 @@ class Changer:
                 r, d = ai.change(im, hard, p, steps=40, strength=1.0, seed=1 + i * 7, guidance=8.0, progress=progress, status=None, negative=neg, grow=5)
                 r = Image.composite(r.convert("RGB"), im.convert("RGB"), soft)
                 cs_ = color_score(r, hard, col) if col else 1.0; ch = changed_score(im, r, hard); sc = cs_ * (1.0 if ch > 0.35 else 0.4)
+                _bad, _why = washed_out(im, r, hard)
+                if _bad: rejects.append(_why); sc = -0.5
                 if best is None or sc > best[0]: best = (sc, r, d, cs_, ch)
         sc, r, d, cs_, ch = best
         how = f"Method: redraw ({'ControlNet ' + ctl if cn_ok else 'inpaint'}, best of {N}, changed {ch:.2f}" + (f", colour {cs_:.2f})" if col else ")")
@@ -519,6 +523,7 @@ def _redraw_prompt(analysis, tgt, rep):
         others = [c for c in ("white", "brown", "beige", "tan", "skin tone", "nude", "flesh", "black", "grey", "blue", "green", "yellow", "pink", "orange", "purple") if c not in col]
         old += [", ".join(others), "skin tone clothes, bare skin, nude"]
     neg = ", ".join([x for x in old if x] + ["blurry, deformed, low quality, extra limbs, bad anatomy, changed body shape"])
+    if is_garment(tgt, rep): p += ", opaque fabric, fully clothed"; neg += ", transparent, see-through, sheer, translucent, nude, smeared, washed out, ghosting"
     return p, neg
 
 def redraw_mask(im, mask, tgt):
@@ -653,12 +658,47 @@ def feather(hard, r=2.5):
     from PIL import ImageFilter
     return hard.filter(ImageFilter.MaxFilter(3)).filter(ImageFilter.GaussianBlur(r))
 
+def washed_out(orig, new, hard):
+    """Translucent / smeared / ghosted result inside the mask: detail (edge energy) and contrast collapse vs the original
+    and vs the area around it. -> (bad, reason)."""
+    from PIL import ImageFilter
+    m = np.asarray(hard.convert("L")) > 127
+    if m.sum() < 400: return False, ""
+    ring = (np.asarray(hard.convert("L").filter(ImageFilter.MaxFilter(31))) > 127) & ~m
+    def stats(img):
+        g = img.convert("L"); e = np.asarray(g.filter(ImageFilter.FIND_EDGES), np.float32); a = np.asarray(g, np.float32)
+        hsv = np.asarray(img.convert("RGB").convert("HSV"), np.float32)[..., 1]
+        return e, a, hsv
+    eo, ao, so = stats(orig); en, an, sn = stats(new)
+    det = en[m].mean() / max(1.0, eo[m].mean()); con = an[m].std() / max(1.0, ao[m].std())
+    sur = en[ring].mean() if ring.any() else eo[m].mean(); rel = en[m].mean() / max(1.0, sur)
+    sat = sn[m].mean() / max(1.0, so[m].mean())
+    if det < 0.35 and con < 0.6: return True, f"smeared/washed-out area (detail {det:.2f}, contrast {con:.2f})"
+    if rel < 0.25 and sat < 0.5: return True, f"translucent grey wash (detail vs surroundings {rel:.2f}, colour {sat:.2f})"
+    return False, ""
+
+def protect_face(im, mask, instr):
+    """Never let a clothing/limb/object mask touch the face unless the request is about the face/head."""
+    if mask is None or re.search(r"(?i)\b(face|eyes?|eyebrows?|lips|mouth|nose|head|hair|makeup|expression|glasses|sunglasses|hat|helmet|earrings?|whole (image|picture|photo)|style)\b", instr or ""): return mask
+    try:
+        import facefix
+        from PIL import ImageDraw
+        m = mask.convert("L").copy(); d = ImageDraw.Draw(m)
+        for b in facefix.detect_faces(im):
+            x0, y0, x1, y1 = b[:4]; px, py = (x1 - x0) * 0.12, (y1 - y0) * 0.12
+            d.rectangle((x0 - px, y0 - py, x1 + px, y1 + py), fill=0)
+        return m
+    except Exception: logging.exception("protect_face"); return mask
+
 def quality_checks(orig, new, hard, kind=""):
     """-> (ok, reason). Rejects: old garment left inside the mask, blotchy/torn texture, new skin (stray hands) in a
     background, and fabric spilling outside the original outline."""
     from PIL import ImageFilter
     m = np.asarray(hard) > 127
     if m.sum() < 200: return True, ""
+    if kind != "background":
+        bad, why = washed_out(orig, new, hard)
+        if bad: return False, why
     inner = np.asarray(hard.filter(ImageFilter.MinFilter(7))) > 127
     a = np.asarray(orig.convert("RGB"), np.float32); b = np.asarray(new.convert("RGB"), np.float32)
     ho = np.asarray(orig.convert("RGB").convert("HSV"), np.float32) / 255.0; hn = np.asarray(new.convert("RGB").convert("HSV"), np.float32) / 255.0
@@ -836,6 +876,7 @@ def change_prompt(analysis, tgt, rep, col, garment):
     if re.search(r"\bhair\b", t) and re.search(r"\b(short|bob|pixie)\b", rep or "", re.I): old += ["long hair, rainbow hair, colorful hair, multicolored hair"]
     neg = ", ".join([x for x in [tgt if tgt and tgt.lower() not in (rep or "").lower() else "", *old, others] if x] +
                     ["extra limbs, deformed, changed body shape, blurry, low quality"])
+    if is_garment(tgt, rep): p += ", opaque fabric, fully clothed"; neg += ", transparent, see-through, sheer, translucent, nude, smeared, washed out, ghosting"
     return p, neg
 
 def control_map(im, hard, mode="keep"):
