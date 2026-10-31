@@ -157,9 +157,14 @@ CHIP MONITOR (window opened from the top bar)
   Same-shape swaps keep the original outline; shape changes use looser guidance. It draws 4 versions and keeps
   the one that really changed (and matches the colour you asked for). Recolor is only a clearly-labelled last resort.
   Body shape/proportions are never changed.
-* Pose changes (wave, arms crossed, hands on hips, arm raised): OpenPose finds her skeleton, the arm joints are moved
-  to the new pose and the arms are redrawn with OpenPose + lineart ControlNets together; each version is re-checked
-  against the target pose and any version with a hand on the chest/body is thrown away.
+* Pose changes: wave, arms crossed / folded, hands on hips, one hand on hip, both arms raised overhead / hands up,
+  peace (V) sign, hands behind head, thumbs up, pointing, arms relaxed at sides, salute, hand on chin (thinking),
+  one arm raised. Common phrasings are understood ("cross her arms", "hands in the air", "thumbs-up", "arms down").
+  OpenPose finds her skeleton, the arm joints are moved to the new pose and the arms are redrawn with OpenPose +
+  lineart ControlNets together. The old arm position is first painted out as clean background, so no old-arm or
+  fabric fragments remain. Her face, eyes, hair and body outline are protected (no body reshaping). Each version is
+  re-checked: wrong pose, a hand on the chest/body, non-skin arms (gloves/sleeves), or a changed outline are thrown
+  away; if every version fails, the status says NOT DONE and the original is kept.
 * Hair changes cover the whole hair (long anime hair over the shoulders too); "short" hair also paints the old long
   hair area back to background. Background swaps use the cut-out's soft edge, so no grey halo around the person.
 * Quality guards: colour must really match (strict hue + saturation/brightness - ochre/brown never counts as yellow,
@@ -167,6 +172,13 @@ CHIP MONITOR (window opened from the top bar)
   with old-garment patches, blotchy texture, torn outlines or stray hands near a new background are thrown away, a
   second seed batch is tried, and if nothing passes the status says NOT DONE and the original is kept.
   Extra first-time download for poses: OpenPose ControlNet (~0.7 GB) + OpenPose detector (~0.5 GB).
+* Style outfits: words like fire/flame, lava, ice, galaxy/space, floral/flower, camo, rainbow, leopard/cheetah, zebra,
+  ocean, gold, sparkly, neon, plaid, polka dot and candy are expanded into a full description with the colours to
+  expect ("fire dress" -> a dress made of fire and flames, red/orange/yellow). Every version is checked by CLIP
+  (image vs. text: the request against "plain brown/grey cloth", "beige smock", "white uniform") and by colour;
+  big flat blank patches and muddy low-saturation results are rejected when a colour is implied. "Plain/solid"
+  wording is only used for plain colour requests. If nothing passes: NOT DONE, original kept.
+  Extra first-time download: CLIP ViT-B/32 (~0.6 GB). After an AI Change is applied the picture is re-analyzed.
 
 ------------------------------------------------------------
 NOTES / LIMITS
@@ -179,6 +191,7 @@ DESKTOP PC LINK (laptop + desktop working together)
 - Device picker has two more choices: "Desktop PC" and "Both machines".
   - Desktop PC: Image Gen, upscaling, AI Change (redraw, pose, recolor), background removal and AI erase run on the desktop's RTX 4070 (12 GB); the picture is sent over the home network and the result comes back with progress.
   - Both machines: upscale splits the image by rows (desktop takes the larger, learned share; laptop does the rest), with fallback to local; generation and AI Change go to the desktop.
+  - Both machines + AI Change: the candidate versions are drawn in parallel, every other one on the desktop, then all are checked here as usual.
   - If the desktop is offline, jobs run on the laptop and the status line says so.
 - "Pair desktop..." button: enter the desktop's address and pairing key once (shown in the NpuStudio-Server window).
 - Top bar shows "Desktop PC: online/offline"; the Chip Monitor shows the desktop GPU's use, memory, power and temperature (N/A when unreadable).

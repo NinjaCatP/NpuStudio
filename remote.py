@@ -60,6 +60,29 @@ def call(fn, *args, progress=None, status=None, **kw):
     except urllib.error.HTTPError as e: raise RuntimeError("Desktop PC: " + json.loads(e.read()).get("error", "failed"))
     return wire.unpack(data)
 
+_tl = threading.local()
+def is_local(): return bool(getattr(_tl, "local", False))
+def both():
+    """True in 'Both machines' mode with the desktop online (AI Change then splits its candidate versions)."""
+    try: return mode() == "Both machines" and online()
+    except Exception: return False
+def run_split(make, n):
+    """Run make(k) for k in 0..n-1: even k on this laptop, odd k on the desktop, in parallel. A job that fails remotely is
+    redone locally. Inside make(), is_local() tells which side it is running on (pass progress callbacks only locally)."""
+    res = [None] * n
+    def worker(ks, local):
+        _tl.local = local
+        for k in ks:
+            t = time.time()
+            try: res[k] = make(k); logging.info("split job %d on %s %.1fs", k, "laptop" if local else "desktop", time.time() - t)
+            except Exception: logging.exception("split job %d (%s)", k, "laptop" if local else "desktop")
+        _tl.local = False
+    th = threading.Thread(target=worker, args=(range(1, n, 2), False), daemon=True); th.start()
+    worker(range(0, n, 2), True); th.join()
+    miss = [k for k in range(n) if res[k] is None]
+    if miss: worker(miss, True)
+    return res
+
 _patched = [False]
 def start_reporter(name="Laptop"):
     """Push this PC's Chip Monitor numbers to the desktop every 3 s so the phone app's Monitor tab can show the laptop."""
@@ -91,7 +114,7 @@ def install():
         orig = getattr(cudaeng, name, None)
         if orig is None: continue
         def wrap(*a, _o=orig, _n=name, progress=None, status=None, **kw):
-            if active():
+            if not is_local() and active():
                 t = time.time(); r = call(_n, *a, progress=progress, status=status, **kw)
                 logging.info("remote %s %.1fs", _n, time.time() - t); return r
             return _o(*a, progress=progress, status=status, **kw)

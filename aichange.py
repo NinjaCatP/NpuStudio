@@ -243,18 +243,38 @@ class Changer:
             cp, cneg = change_prompt(analysis, tgt, rep, col, garment)
             bright = bool(re.search(r"\b(bright|vivid|neon|light)\b", rep or "", re.I))
             qkind = "garment" if garment else ("background" if re.search(r"\b(background|sky|wall|scene)\b", tgt or "", re.I) else "")
-            rejects = []
+            rejects = []; pre = {}; sty = style_of_rep(rep) if garment else None
             for i in range(N * 2):
                 if i == N:
                     if best is not None and best[0] >= COLOR_OK: break
                     cp = (f"{col} {col} {col}, " if col else "") + cp; logging.info("second batch, stronger prompt")  # retry
-                if status: status(f"Drawing '{rep}' - version {i + 1} (ControlNet {ctl}, NVIDIA)...")
-                try: r = cn_redraw(im, hard, soft, cp, cneg, seed=11 + i * 7, progress=progress, status=status, mode=ctl)
+                if i % N == 0:  # Both machines: draw this batch in parallel, every other version on the desktop
+                    pre = {}
+                    try:
+                        import remote
+                        if remote.both():
+                            if status: status(f"Drawing '{rep}' - versions {i + 1}-{i + N} on both machines in parallel...")
+                            _cp, _i0 = cp, i
+                            rs = remote.run_split(lambda k: cn_redraw(im, hard, soft, _cp, cneg, seed=11 + (_i0 + k) * 7, progress=progress if remote.is_local() else None, mode=ctl), N)
+                            pre = {i + k: x for k, x in enumerate(rs) if x is not None}
+                    except Exception: logging.exception("both machines split")
+                if status and i not in pre: status(f"Drawing '{rep}' - version {i + 1} (ControlNet {ctl}, NVIDIA)...")
+                try: r = pre.pop(i) if i in pre else cn_redraw(im, hard, soft, cp, cneg, seed=11 + i * 7, progress=progress, status=status, mode=ctl)
                 except Exception: logging.exception("controlnet redraw"); break
-                cs_ = color_score(r, hard, col, bright) if col else 1.0; ch = changed_score(im, r, hard)
+                cs_ = color_score(r, hard, col, bright) if col else (style_score(r, hard, sty) if sty else 1.0); ch = changed_score(im, r, hard)
                 sc = cs_ * (1.0 if ch > 0.35 else 0.4)
                 if hair_short: sc = hair_short_score(im, r, hard, col)
-                qok, why = quality_checks(im, r, hard, qkind)
+                qok, why = quality_checks(im, r, hard, "garment_pattern" if (sty and qkind == "garment") else qkind)
+                if qok and garment and (col or sty):
+                    fb = flat_blob(r, hard); sat = muddy(r, hard)
+                    vivid = (sty and STYLES[sty][1] != ["black", "white"] and sty != "ice") or (col and col not in ("white", "black", "grey", "gray", "beige", "brown", "silver"))
+                    if vivid and fb > 0.12: qok, why = False, f"big flat blank patch ({fb:.2f})"
+                    elif vivid and sat < 0.28: qok, why = False, f"muddy/dull colours (saturation {sat:.2f})"
+                    elif sty:
+                        cm = clip_match(r, hard, STYLES[sty][2])
+                        logging.info("candidate %d CLIP '%s' %.2f", i, STYLES[sty][2], -1 if cm is None else cm)
+                        if cm is not None and cm < 0.4: qok, why = False, f"does not look like {STYLES[sty][2]} (CLIP {cm:.2f})"
+                        elif cm is not None and ch > 0.35: sc = max(sc, 0.5 * sc + 0.5 * cm)  # CLIP confirms the style even if its colours are off-palette
                 if not qok: rejects.append(why); logging.info("candidate %d rejected: %s", i, why); sc = min(sc, -0.5)
                 if tgt == "arms":
                     try:
@@ -280,7 +300,10 @@ class Changer:
         elif sc < 0:
             how = f"NOT DONE - all {len(rejects)} versions failed the quality checks ({'; '.join(sorted(set(rejects))[:3])}). Original kept; try rewording or painting the area."
             r = im.convert("RGB"); sc = 1.0
-        if sc < COLOR_OK and col and re.search(r"\b(different|new|another)\s+(style|design|cut)\b", rep or "", re.I):
+        _sty = style_of_rep(rep) if garment else None
+        if sc < COLOR_OK and _sty and not col:
+            how = f"NOT DONE - no version looked like a {_sty} {('outfit' if not re.search(r'dress', rep or '') else 'dress')} (best style score {cs_:.2f}). Original kept; try again or reword."; r = im.convert("RGB")
+        elif sc < COLOR_OK and col and re.search(r"\b(different|new|another)\s+(style|design|cut)\b", rep or "", re.I):
             how = f"NOT DONE - no version came out {col} enough (best colour {cs_:.2f}) with a new design. Original kept; try again or reword."; r = im.convert("RGB")
         elif sc < COLOR_OK and col and (garment or re.search(r"\bhair\b", f"{tgt} {rep}", re.I)) and not re.search(SHAPE_CHANGE, rep or "", re.I):
             r = recolor_fill(im.convert("RGB"), hard, col); how = f"Method: LAST RESORT recolor of the original (redraw failed: changed {ch:.2f}, colour {cs_:.2f})"
@@ -361,16 +384,26 @@ def grow(mask, px):
 GLOBAL_WORDS = r"\b(night|nighttime|day|daytime|sunset|sunrise|winter|summer|autumn|fall|snow|rain|watercolou?r|painting|oil|sketch|cartoon|anime|pixel|style|vintage|black and white|b&w|cinematic|lighting|mood|whole|everything|entire|image|picture|photo)\b"
 POSS = r"(?:the\s+|her\s+|his\s+|their\s+|its\s+|my\s+|your\s+|this\s+|that\s+)?"
 SCENE = r"(it|this|that|the image|the picture|the photo|everything|image|picture|photo|the scene|scene|the whole (?:image|picture|photo))"
-POSE_TXT = {"wave": "waving with one hand raised", "waving": "waving with one hand raised", "arms": "arms crossed over chest",
-            "arm": "arms crossed over chest", "cross": "arms crossed over chest", "crossed": "arms crossed over chest", "arms crossed": "arms crossed over chest",
-            "hands": "hands on hips", "hand": "hands on hips", "thumbs": "giving a thumbs up", "thumb": "giving a thumbs up",
-            "peace": "making a peace sign with her hand", "salute": "saluting", "saluting": "saluting", "point": "pointing with her finger",
-            "pointing": "pointing with her finger", "raise": "one arm raised", "raised": "one arm raised", "raises": "one arm raised"}
-POSE_KEY = {"waving with one hand raised": "wave", "arms crossed over chest": "crossed", "hands on hips": "hips", "one arm raised": "raise"}
+POSE_PATTERNS = [  # (phrasing regex, pose key, prompt text) - checked in order
+    (r"hands? (?:behind|on the back of) (?:her|his|their|the) head|hands? behind head", "behindhead", "hands behind her head"),
+    (r"(?:one|a|her|his) hand on (?:her|his|their|the|a)? ?hip\b|hand on (?:her|his|their|the)? ?hip\b", "onehip", "one hand on her hip"),
+    (r"hands? on (?:her|his|their|the)? ?hips|akimbo", "hips", "hands on hips"),
+    (r"arms? (?:are )?crossed|cross(?:ed|ing|es)? (?:her|his|their|the)? ?arms|fold(?:ed|ing|s)? (?:her|his|their)? ?arms|arms? folded", "crossed", "arms crossed"),
+    (r"(?:both )?(?:arms|hands) (?:raised |up )?(?:over|above) (?:her|his|their|the)? ?head|raise (?:both|her|his|their) (?:arms|hands)|(?:arms|hands) up\b|both (?:arms|hands) (?:up|raised)|hands in the air|arms in the air|hands up", "overhead", "both arms raised overhead"),
+    (r"peace sign|peace|v[- ]sign|victory sign", "peace", "making a peace sign"),
+    (r"thumbs?[- ]?up", "thumbs", "giving a thumbs up"),
+    (r"salut(?:e|es|ing)", "salute", "saluting"),
+    (r"hand (?:on|under) (?:her|his|their|the)? ?chin|chin (?:in|on) (?:her|his)? ?hand|thinking(?: pose)?|thoughtful pose|pondering", "chin", "hand on chin, thinking"),
+    (r"point(?:ing|s)?\b", "point", "pointing"),
+    (r"arms? (?:at|by|down by|down at) (?:her|his|their)? ?sides?|hands? (?:at|by) (?:her|his)? ?sides?|arms? down|relax(?:ed)? (?:arms|pose|her arms)|arms? relaxed|neutral pose|standing straight", "sides", "arms relaxed at her sides"),
+    (r"wav(?:e|es|ing)", "wave", "waving with one hand raised"),
+    (r"raise[sd]? (?:her|his|their|an?|one) (?:arm|hand)|(?:arm|hand) raised", "raise", "one arm raised"),
+]
+POSE_KEY = {t: k for _, k, t in POSE_PATTERNS}
 def parse(instr):
     """-> (target or None, replacement, kind) where kind in remove/replace/global."""
-    _p = re.search(r"(?i)\b(wav(e|ing)|arms? crossed|cross(ed)? (her|his|their) arms|hands? on (her|his) hips|thumbs? up|peace sign|salut(e|ing)|point(ing)?|raise[sd]? (her|his|their|an?) (arm|hand)s?)\b", instr or "")
-    if _p: return "arms", POSE_TXT.get(_p.group(1).lower().split()[0], _p.group(0).lower()), "replace"
+    for _rx, _k, _t in POSE_PATTERNS:
+        if re.search(r"(?i)\b(?:" + _rx + r")\b", instr or ""): return "arms", _t, "replace"
     _h = re.search(r"(?i)\b(?:hold|holding|hold up|give (?:her|him|them) an?)\s+(?:an?\s+|the\s+|some\s+)?([a-z \-]+)$", instr or "")
     if _h: return "arms", f"holding a {_h.group(1).strip()} in her hand", "replace"
     _m = re.match(r"(?i)^\s*(?:make|turn)\s+(?:the\s+|her\s+|his\s+|their\s+)?(hair|outfit|dress|shirt|hat|background|sky)\s+(?!to\b|into\b|an?\b)([a-z ,\-]+?)\s*$", instr or "")
@@ -581,13 +614,15 @@ def quality_checks(orig, new, hard, kind=""):
     inner = np.asarray(hard.filter(ImageFilter.MinFilter(7))) > 127
     a = np.asarray(orig.convert("RGB"), np.float32); b = np.asarray(new.convert("RGB"), np.float32)
     ho = np.asarray(orig.convert("RGB").convert("HSV"), np.float32) / 255.0; hn = np.asarray(new.convert("RGB").convert("HSV"), np.float32) / 255.0
+    pat = kind == "garment_pattern"
+    if pat: kind = "garment"
     if kind == "garment":
         left = (np.sqrt(((b - a) ** 2).sum(-1)) < 18)[inner].mean()  # untouched old pixels
         if left > 0.12: return False, f"old garment left ({left:.2f})"
         def hf(x):
             g = np.asarray(x.convert("L"), np.float32); bl = np.asarray(x.convert("L").filter(ImageFilter.GaussianBlur(2)), np.float32); return np.abs(g - bl)
         no, nn = hf(orig)[inner].mean(), hf(new)[inner].mean()
-        if nn > max(6.0, no * 2.2): return False, f"blotchy texture ({nn:.1f} vs {no:.1f})"
+        if nn > max(6.0, no * (4.0 if pat else 2.2)): return False, f"blotchy texture ({nn:.1f} vs {no:.1f})"
         # outline: the redraw must fill its mask (no background showing through = torn/warped edge)
         ring = m & ~inner
         bgc = np.median(a[~(np.asarray(hard.filter(ImageFilter.MaxFilter(15))) > 127)], 0)
@@ -638,11 +673,101 @@ def control_mode(tgt, rep):
     if is_garment(tgt, rep): return "keep"
     return "loose" if re.search(SHAPE_CHANGE, rep or "", re.I) else "keep"
 
+STYLES = {  # style word -> (prompt expansion, expected colours (COLOR_RGB names; [] = any vivid colours), what CLIP should see)
+    "fire": ("made of fire, flame pattern, orange red and yellow glowing fabric, burning flames motif, fiery gradient", ["red", "orange", "yellow"], "a dress made of fire and flames"),
+    "flame": ("made of fire, flame pattern, orange red and yellow glowing fabric, burning flames motif", ["red", "orange", "yellow"], "a dress made of fire and flames"),
+    "lava": ("molten lava pattern, glowing orange and red cracks on black fabric", ["red", "orange"], "a lava pattern dress"),
+    "ice": ("made of ice, frosty crystal fabric, pale icy blue and white, frost and ice crystal pattern, shimmering", ["blue", "cyan", "white"], "a dress made of ice crystals"),
+    "galaxy": ("galaxy print fabric, deep purple and dark blue starry night sky, stars and pink nebula", ["purple", "blue", "pink"], "a galaxy print dress with stars"),
+    "space": ("galaxy print fabric, deep purple and dark blue starry night sky, stars and nebula", ["purple", "blue"], "a galaxy print dress with stars"),
+    "floral": ("floral print, colorful flowers printed all over the fabric, roses and leaves", [], "a floral print dress with flowers"),
+    "flower": ("floral print, colorful flowers printed all over the fabric, roses and leaves", [], "a floral print dress with flowers"),
+    "camo": ("green camouflage pattern, military camo fabric, olive and dark green and brown patches", ["green", "olive"], "a camouflage pattern dress"),
+    "camouflage": ("green camouflage pattern, military camo fabric, olive and dark green and brown patches", ["green", "olive"], "a camouflage pattern dress"),
+    "rainbow": ("rainbow striped fabric, red orange yellow green blue purple stripes, vivid", ["red", "yellow", "green", "blue", "purple"], "a rainbow striped dress"),
+    "leopard": ("leopard print, golden tan fabric with black rosette spots, animal print", ["orange", "gold", "black"], "a leopard print dress"),
+    "cheetah": ("cheetah print, golden tan fabric with black spots, animal print", ["orange", "gold", "black"], "a cheetah print dress"),
+    "zebra": ("zebra print, bold black and white stripes, animal print", ["black", "white"], "a zebra stripe dress"),
+    "ocean": ("ocean wave pattern, deep blue and turquoise water print", ["blue", "cyan"], "a dress with an ocean wave print"),
+    "water": ("flowing water pattern, blue and turquoise fabric with water ripples", ["blue", "cyan"], "a dress made of water"),
+    "gold": ("shiny metallic gold fabric, glittering golden", ["gold", "yellow", "orange"], "a shiny gold dress"),
+    "sparkly": ("sparkly sequin fabric, glittering, shiny sequins", [], "a sparkly sequin dress"),
+    "neon": ("neon glowing fabric, vivid neon pink green and blue", ["pink", "green", "blue"], "a neon colored dress"),
+    "plaid": ("plaid tartan pattern, red and black checks", ["red", "black"], "a plaid dress"),
+    "polka": ("polka dot pattern, white dots on colored fabric", [], "a polka dot dress"),
+    "candy": ("candy pattern, pastel pink and mint stripes and sweets print", ["pink"], "a candy print dress"),
+}
+def style_of_rep(rep):
+    for w in re.findall(r"[a-z]+", (rep or "").lower()):
+        if w in STYLES: return w
+    return None
+
+def style_score(img, mask, key):
+    """0..1 for a style request: share of the area in the style's colours (any vivid colour for floral/sparkly)."""
+    m = np.asarray(mask) > 127
+    if not m.any(): return 0.0
+    cols = STYLES[key][1]
+    if not cols:
+        hsv = np.asarray(img.convert("RGB").convert("HSV"), np.float32)[m] / 255.0
+        return float(min(1.0, np.mean((hsv[:, 1] > 0.35) & (hsv[:, 2] > 0.3)) / 0.4))
+    tot = sum(color_score(img, mask, c) for c in cols if c in COLOR_RGB)
+    return float(min(1.0, tot / 0.5))
+
+_CLIP = {}
+def clip_match(img, hard, text, negs=("a plain brown cloth dress", "a plain grey cloth dress", "a blank beige smock", "a white nurse uniform")):
+    """CLIP image-text check on the changed area: probability that it shows `text` rather than the plain/muddy fallbacks.
+    Returns None when CLIP is unavailable (check skipped)."""
+    try:
+        import torch
+        from transformers import CLIPModel, CLIPProcessor
+        if "m" not in _CLIP:
+            hf = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "hf")
+            dev = "cuda" if torch.cuda.is_available() else "cpu"
+            _CLIP["m"] = CLIPModel.from_pretrained("openai/clip-vit-base-patch32", cache_dir=hf).to(dev).eval()
+            _CLIP["p"] = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32", cache_dir=hf); _CLIP["d"] = dev
+        bb = hard.getbbox()
+        if not bb: return None
+        crop = Image.composite(img.convert("RGB"), Image.new("RGB", img.size, (128, 128, 128)), hard).crop(bb)
+        inp = _CLIP["p"](text=[text, *negs], images=crop, return_tensors="pt", padding=True, truncation=True, max_length=77).to(_CLIP["d"])
+        with torch.no_grad(): pr = _CLIP["m"](**inp).logits_per_image.softmax(-1)[0]
+        return float(pr[0])
+    except Exception:
+        logging.exception("clip check"); _CLIP["m"] = None if "m" not in _CLIP else _CLIP["m"]
+        return None
+
+def flat_blob(img, hard):
+    """Share of the area that is a big flat, unshaded, low-saturation patch (blank beige/grey blob)."""
+    from PIL import ImageFilter
+    inner = np.asarray(hard.filter(ImageFilter.MinFilter(9))) > 127
+    if inner.sum() < 400: return 0.0
+    g = img.convert("L"); a = np.asarray(g, np.float32)
+    from scipy import ndimage as _nd
+    mu = _nd.uniform_filter(a, 15); std = np.sqrt(np.clip(_nd.uniform_filter(a * a, 15) - mu * mu, 0, None))
+    sat = np.asarray(img.convert("RGB").convert("HSV"), np.float32)[..., 1] / 255.0
+    flat = (std < 2.5) & (sat < 0.3)
+    lab = flat & inner
+    try:
+        from scipy import ndimage
+        l, n = ndimage.label(lab)
+        if n == 0: return 0.0
+        big = np.bincount(l.ravel())[1:].max()
+        return float(big / inner.sum())
+    except Exception: return float(lab[inner].mean())
+
+def muddy(img, hard):
+    """Mean saturation inside the area (low = muddy brown/grey)."""
+    m = np.asarray(hard) > 127
+    if not m.any(): return 1.0
+    return float((np.asarray(img.convert("RGB").convert("HSV"), np.float32)[..., 1] / 255.0)[m].mean())
+
 def change_prompt(analysis, tgt, rep, col, garment):
     anime = bool(re.search(ILLU, analysis or "", re.I))
     style = "anime illustration, clean line art, flat cel shading" if anime else "photo, realistic, natural lighting"
     t = (tgt or "").lower()
-    if garment: subj = f"a woman wearing a plain {rep}, simple solid-color {rep}" + (f", {col} {col} fabric, solid {col}" if col else "")
+    sty = style_of_rep(rep)
+    if garment and sty: subj = f"a woman wearing a {rep}, {STYLES[sty][0]}, vivid colors"  # pattern/style: no 'plain/solid' wording
+    elif garment and col: subj = f"a woman wearing a plain {rep}, simple solid-color {rep}, {col} {col} fabric, solid {col}"
+    elif garment: subj = f"a woman wearing a {rep}"
     elif t == "arms": subj = f"a woman {rep}, bare arm, detailed hand, five fingers"
     elif re.search(r"\bhair\b", t):
         r2 = re.sub(r"\bhair\b", "", rep or "").strip()
@@ -654,7 +779,9 @@ def change_prompt(analysis, tgt, rep, col, garment):
     others = ", ".join(c for c in ("white", "brown", "beige", "black", "grey", "blue", "green", "yellow", "pink", "purple", "red") if c != col) if col else ""
     old = [w for w in re.findall(r"\b(?:\w+\s)?(?:uniform|suit|jacket|coat|shirt|dress|cap|hat|helmet|wall|background)\b", analysis or "", re.I)[:3]
            if w.lower() not in (rep or "").lower()]
-    if garment: old += ["pattern, print, text, logo, floral, graffiti", "nurse uniform", "collar", "name badge", "buttons", "zipper", "belt", "skin tone fabric", "bare skin", "nude"]
+    if garment and not sty and col: old += ["pattern, print, text, logo, floral, graffiti"]
+    if garment and sty: old += ["plain fabric, muddy, brown, grey, beige, dull colors, blank patch, flat untextured area"]
+    if garment: old += ["nurse uniform", "collar", "name badge", "buttons", "zipper", "belt", "skin tone fabric", "bare skin", "nude"]
     if re.search(r"\b(background|sky|wall|scene)\b", t): old += ["hands, arms, fingers, person, people, extra hand, hair strands"]
     if garment: old += ["torn edges, ragged, stains, dirty, brown, ochre, mustard"] if col == "yellow" else ["torn edges, ragged, stains, dirty"]
     if t == "arms": old += ["hand on chest, hand on breast, touching body, groping, hands on torso"]

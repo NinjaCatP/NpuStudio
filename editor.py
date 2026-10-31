@@ -487,6 +487,7 @@ def build_edit_tab(root, nb, send_to_upscale=None, dnd=None, upscale=None):
                         if job != cs["job"]: return
                         push(res, f"AI change done in {dt:.1f}s ({how} on {dv})")
                         if w.winfo_exists(): pused.set(p); wst.set(f"Done in {dt:.1f}s - {how} on {dv}. Undo to revert."); cs.update(auto=None, auto_for=None); draw()
+                        if w.winfo_exists() and res is not im: eng["ana"].clear(); analyze(force=True)  # the picture changed: describe the new one
                     ui(done)
                 except Exception as e:
                     logging.exception("AI change"); ui(wst.set, f"Error: {e}")
