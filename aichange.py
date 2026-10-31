@@ -177,8 +177,16 @@ class Changer:
         analysis = atext(analysis)
         """Whole-image change. NVIDIA: InstructPix2Pix (takes the instruction directly, keeps faces).
         Otherwise LCM img2img with a rewritten scene prompt. Returns (img, devices, how, prompt_used)."""
+        import facefix
+        _blk = facefix.reshape_block(instr)
+        if _blk: raise ValueError(_blk)   # no body reshaping, ever
+        _bf = facefix.body_fix(instr)
+        if _bf:   # "fix legs and arms" / Fix body: low-denoise limb detail repair, silhouette checked, only if better
+            _m = None
+            if _m is None or not _m.getbbox(): _m = facefix.find_mask(im, _bf[0], instr, analysis)[0]
+            r, how, ok = facefix.fix_body(im, _m, _bf, analysis, progress=progress, status=status)
+            return r, ("NVIDIA",), how, "(limb repair: " + ", ".join(_bf) + ")"
         try:
-            import facefix
             _fw = facefix.fix_what(instr)
         except Exception: _fw = None
         if _fw:   # "fix eyes" / "fix face": ADetailer-style detail pass on every face (mask not needed)
@@ -209,8 +217,16 @@ class Changer:
           redraw  = new object / garment ("outfit to red dress", "replace X with Y") -> SD inpainting, strength 1.0,
                     style words from the analysis, negative prompt naming the old thing, bigger feathered mask with
                     face/hands/hair protected. Returns (img, devs, how, prompt)."""
+        import facefix
+        _blk = facefix.reshape_block(instr)
+        if _blk: raise ValueError(_blk)   # no body reshaping, ever
+        _bf = facefix.body_fix(instr)
+        if _bf:   # "fix legs and arms" / Fix body: low-denoise limb detail repair, silhouette checked, only if better
+            _m = mask if mask is not None else None
+            if _m is None or not _m.getbbox(): _m = facefix.find_mask(im, _bf[0], instr, analysis)[0]
+            r, how, ok = facefix.fix_body(im, _m, _bf, analysis, progress=progress, status=status)
+            return r, ("NVIDIA",), how, "(limb repair: " + ", ".join(_bf) + ")"
         try:
-            import facefix
             _fw = facefix.fix_what(instr)
         except Exception: _fw = None
         if _fw:   # "fix eyes" / "fix face": ADetailer-style detail pass on every face (mask not needed)
@@ -481,7 +497,14 @@ def method_for(rep):
 
 ILLU = r"\b(cartoon|anime|manga|illustration|illustrated|drawing|drawn|comic|animated|cel|vector|digital art|chibi)\b"
 def redraw_prompt(analysis, tgt, rep):
-    analysis = atext(analysis)
+    p, n = _redraw_prompt(atext(analysis), tgt, rep)
+    try:
+        import facefix
+        if re.search(facefix.RESHAPE_PARTS, f"{tgt} {rep}"): p = facefix.strip_size_words(p)   # never size/shape words for body parts
+    except Exception: logging.exception("size guard")
+    return p, n
+
+def _redraw_prompt(analysis, tgt, rep):
     rep = re.sub(r"(?i)^(an?|the)\s+", "", (rep or "").strip().rstrip("."))
     if re.search(ILLU, analysis or "", re.I): style = "anime illustration, clean line art, bold outlines, flat vibrant colors"
     else: style = style_of(analysis) + ", realistic, natural lighting"

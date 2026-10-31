@@ -231,3 +231,9 @@ Face and eye detailer (v1.6.2)
 - AI Change selects face parts more tightly: eyes, left/right eye, eyebrows, mouth/lips, nose, face, pupils/iris. Each face is found by the body/face parsers (with CLIPSeg as a fallback), cropped, upscaled to 768 and segmented there; the eyes get a second 512px pass. Hands are told apart from arms on upscaled arm crops. On the desktop the CLIPSeg OpenVINO model is replaced by transformers CLIPSeg when it is missing.
 - "fix eyes" / "fix face" in AI Change (desktop, laptop and phone Edit, which has Fix eyes and Fix face buttons) runs an ADetailer-style pass. The face is cropped with padding and upscaled to 768, inpainted at low denoise (0.32-0.45) with DreamShaper-8 inpaint + lineart ControlNet, keeping the detected iris colour. Candidates are scored on CLIP plausibility, symmetry and colour match, and the best one is pasted back at native resolution with a feathered edge. It only pastes when the result scores at least as well as the original; otherwise it keeps the original and says so. Both machines splits the candidates. Detail only: no identity or age change and no body reshaping.
 - Image Gen has an "Auto-fix faces" option (on by default, also on the phone Gen tab). It runs the same pass after each image when NVIDIA is available.
+
+== 1.6.5 (2026-10-31) ==
+- AI Change: "fix/repair <limbs>" = gentle detail repair (low strength, outline check, keep only if better); multi-part masks ("fix legs and arms").
+- Body reshaping (bigger/smaller/longer… on body parts) is refused; size words stripped from body prompts.
+- Fix body button (PC + phone): arms, hands, legs, feet only.
+- Edit mask: Add / Erase brush, size, Undo stroke on top of the auto-mask (PC dialog preview; phone "Show auto-mask").

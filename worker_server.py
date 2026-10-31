@@ -292,10 +292,20 @@ def api_job(kind, a, j):
         im = b64img(a["image"])
         r, d = ai().remove_bg(im, stat) if kind == "remove_bg" else ai().erase(im, b64img(a["mask"]).convert("L").resize(im.size), stat)
         return {"image": imgb64(r), "device": str(d), **save_out(r, "edit", stat, kind.replace("_", "-"))}
+    if kind == "find_mask":  # AI Change: show the auto-mask on the phone so it can be edited before Apply
+        import aichange, facefix
+        im = b64img(a["image"]).convert("RGB"); instr = a.get("instruction", "")
+        if facefix.reshape_block(instr): raise ValueError(facefix.reshape_block(instr))
+        tgt = aichange.parse(instr)[0] if instr else None
+        if not tgt and not facefix.body_parts(instr): return {"mask": None, "how": "no target in the instruction", "conf": 0.0}
+        stat("finding the target..."); m, c, how = facefix.find_mask(im, tgt or facefix.body_parts(instr)[0], instr, "")
+        return {"mask": imgb64(m.convert("L")) if m is not None and m.getbbox() else None, "how": how, "conf": round(float(c), 2)}
     if kind == "change":     # AI Change: free-text instruction, optional mask (white = area to change)
         import aichange
         if _chg["c"] is None: _chg["c"] = aichange.Changer()
         c = _chg["c"]; im = b64img(a["image"]).convert("RGB"); instr = a["instruction"]
+        _blk = __import__("facefix").reshape_block(instr)
+        if _blk: raise ValueError(_blk)
         stat("analyzing picture..."); ana = aichange.atext(c.analyze(im, stat))   # analyze() -> (text, device, secs)
         mask = b64img(a["mask"]).convert("L").resize(im.size) if a.get("mask") else None
         if mask is None:
@@ -315,7 +325,7 @@ def api_job(kind, a, j):
             r = c.edit_masked(ai(), im, mask, instr, ana, strength=max(0.5, min(1.0, st_)), progress=prog, status=stat, method=method)
         else:
             import facefix
-            if not facefix.fix_what(instr) and not aichange.is_global(instr) and not a.get("whole"):
+            if not facefix.fix_what(instr) and not facefix.body_fix(instr) and not aichange.is_global(instr) and not a.get("whole"):
                 raise ValueError("Couldn't find what to change. Name the thing (e.g. 'change outfit to a red dress'), paint it with the brush, "
                                  "or tick 'Whole picture' for a whole-picture change. Nothing was changed.")
             st_ = float(a.get("strength", 0.4)); r = c.edit_whole(im, instr, ana, strength=max(0.2, min(0.6, st_)), progress=prog, status=stat)

@@ -161,6 +161,8 @@ def find_mask(im, tgt, instr="", analysis=""):
     """The one target finder for AI Change (desktop app, laptop app, phone API): face parts on upscaled face crops,
     then the body/clothing parser, then CLIPSeg. -> (L mask, confidence, how)."""
     analysis = _atext(analysis); tgt = _atext(tgt) if isinstance(tgt, (tuple, list)) else tgt
+    mm = multi_mask(im, instr, analysis) if len(body_parts(instr)) >= 2 else None
+    if mm is not None: return mm
     t = time.time(); r = None
     if part_key(tgt or "") or part_key(instr or ""):
         try: r = find_part(im, tgt if part_key(tgt or "") else instr)
@@ -524,3 +526,108 @@ def fix(im, what="eyes", analysis="", n=4, progress=None, status=None, faces=Non
         notes.append(f"face {fi + 1}: {what} fixed (score {base:.2f} -> {best[0]:.2f}, iris {col or '?'}, worked at {wsz[0]}x{wsz[1]})")
     head = "Method: face/eye detailer (" + ("; ".join(notes)) + ")"
     return (out if ok_any else im), (head if ok_any else "NOT DONE - " + "; ".join(notes)), ok_any
+
+# ---------------- body-part detail repair + reshaping guard ----------------
+BODY_RE = r"(?i)\b(arms?|legs?|hands?|fingers?|feet|foot|toes?)\b"
+BODY_KEY = {"arm": "arms", "arms": "arms", "leg": "legs", "legs": "legs", "hand": "hands", "hands": "hands", "finger": "hands",
+            "fingers": "hands", "foot": "feet", "feet": "feet", "toe": "feet", "toes": "feet"}
+FIXVERB = r"(?i)\b(?:fix|repair|correct|clean\s*up|improve|redo|refine|restore)\b"
+SIZE_WORDS = (r"(?i)\b(bigger|biggest|larger|largest|smaller|smallest|thinner|thicker|slimmer|skinnier|fatter|curvier|curvy|longer|shorter|"
+              r"wider|narrower|taller|enlarge[ds]?|enlarging|shrink|shrunk|increase[ds]?|reduce[ds]?|huge|giant|tiny|busty|voluptuous|muscular)\b")
+RESHAPE_PARTS = (r"(?i)\b(breasts?|boobs?|bust|chest|tits?|cleavage|butt|buttocks?|ass|hips?|waist|thighs?|belly|stomach|body|figure|"
+                 r"curves|legs?|arms?|hands?|feet|shoulders?|neck|head|face|eyes?|lips|mouth|nose)\b")
+
+def reshape_block(instr):
+    """Body reshaping is not supported: size/shape words aimed at a body part (or the body) -> refusal text, else None."""
+    s = instr or ""
+    if re.search(SIZE_WORDS, s) and re.search(RESHAPE_PARTS, s):
+        return ("Body reshaping isn't supported - NpuStudio keeps the silhouette and proportions as they are. "
+                "You can change clothes, colours, the background, or use 'fix arms/legs/hands' / 'fix eyes' for detail repair. Nothing was changed.")
+    return None
+
+def strip_size_words(p):
+    """Hard guard for prompts: never emit size/shape words (whatever the analysis or a stale prompt contained)."""
+    p = re.sub(SIZE_WORDS, "", p or ""); p = re.sub(r"(?i)\b(a|an)\s*(?=,|$)", "", p)
+    return re.sub(r"\s*,\s*(,\s*)+", ", ", re.sub(r"\s{2,}", " ", p)).strip(" ,")
+
+def body_parts(text):
+    """All limb parts named in the text, in order: 'fix legs and arms' -> ['legs', 'arms']."""
+    out = []
+    for m in re.finditer(BODY_RE, text or ""):
+        k = BODY_KEY[m.group(1).lower()]
+        if k not in out: out.append(k)
+    return out
+
+def body_fix(instr):
+    """'fix legs and arms' / 'repair her hands' -> ['legs', 'arms'] (detail repair, not a redraw), else None."""
+    if not re.search(FIXVERB, instr or ""): return None
+    if re.search(r"(?i)\b(eyes?|face|faces|pupils?|iris)\b", instr or "") and not body_parts(instr): return None
+    p = body_parts(instr); return p or None
+
+def multi_mask(im, instr, analysis=""):
+    """Union of the masks of every limb part named in the instruction -> (mask, conf, how) or None if fewer than 2 parts."""
+    parts = body_parts(instr)
+    if len(parts) < 2: return None
+    acc = None; confs = []; hows = []
+    for p in parts:
+        try: m, c, h = find_mask(im, p, p, analysis)
+        except Exception: logging.exception("multi part %s", p); continue
+        ok = m is not None and m.getbbox() is not None and c > 0.2
+        hows.append(f"{p}: {'found' if ok else 'not found'} ({c:.2f})")
+        if ok:
+            confs.append(c); a = np.asarray(m.convert("L")) > 127; acc = a if acc is None else (acc | a)
+    if acc is None: return Image.new("L", im.size, 0), 0.0, "; ".join(hows)
+    return Image.fromarray((acc * 255).astype(np.uint8)), min(confs), "parts - " + "; ".join(hows)
+
+BODY_NEG = ("deformed, bad anatomy, extra limbs, extra arms, extra legs, missing limbs, extra fingers, missing fingers, fused fingers, "
+            "mutated hands, malformed hands, broken joints, twisted limbs, different pose, blurry, smudged, lowres, "
+            "nsfw, nude, child, younger, bigger, smaller, different body shape")
+
+def _person(img):
+    try:
+        import bodyparse
+        if bodyparse.available():
+            hn = bodyparse.net("human-parse"); lab = hn.seg(img); return ~np.isin(lab, hn.ids(["background"]))
+    except Exception: logging.exception("person mask")
+    return None
+
+def fix_body(im, mask, parts, analysis="", n=3, progress=None, status=None):
+    """Detail repair of limbs inside `mask`: upscaled crop, low denoise (0.3-0.42), lineart ControlNet keeps the outline and pose;
+    a candidate is pasted only when the person's silhouette is unchanged (IoU >= 0.97) and CLIP rates it at least as well drawn."""
+    import cudaeng
+    W, H = im.size; mk = mask.convert("L").point(lambda v: 255 if v > 100 else 0)
+    bb = mk.getbbox()
+    if not bb: return im, "NOT DONE - couldn't find the " + " and ".join(parts), False
+    wbox = _pad_box(bb, 0.08, W, H, square=False); native = im.convert("RGB").crop(wbox)
+    sc = 768 / max(native.size); ws = (max(8, int(native.size[0] * sc) // 8 * 8), max(8, int(native.size[1] * sc) // 8 * 8))
+    work = native.resize(ws, Image.LANCZOS); mw = mk.crop(wbox).resize(ws, Image.BILINEAR).filter(ImageFilter.MaxFilter(5))
+    ctl = _control(work); style = _style(im, analysis)
+    names = " and ".join(parts)
+    prompt = strip_size_words(f"well-drawn {names}, clean anatomy, correct natural joints" + (", correct five fingers" if "hands" in parts else "") +
+                              ", same pose, same proportions, " + ("anime illustration, clean line art, flat cel shading" if style == "anime" else "photo, natural detail") + ", high quality")
+    txt = [f"well-drawn {names} with correct anatomy", f"deformed {names}", f"extra or missing limbs", f"mutated malformed {names}"]
+    def score(img):
+        try:
+            import torch
+            plaus(work)   # loads CLIP
+            inp = _CLIP["p"](text=txt, images=img, return_tensors="pt", padding=True).to(_CLIP["d"])
+            with torch.no_grad(): return float(_CLIP["m"](**inp).logits_per_image.softmax(-1)[0][0])
+        except Exception: logging.exception("body score"); return None
+    base = score(work); pb = _person(work); best = None
+    for k, st_ in enumerate([0.35, 0.42, 0.3][:n]):
+        if status: status(f"Repairing {names} ({k + 1}/{n}, strength {st_:.2f})...")
+        try:
+            r = cudaeng.inpaint_cn(work, mw.convert("RGB"), ctl, prompt, BODY_NEG, steps=30, guidance=7.0, cn_scale=0.7, seed=211 + k * 13, progress=progress, strength=st_)
+        except Exception: logging.exception("body fix candidate"); continue
+        r = Image.composite(r.convert("RGB"), work, mw.filter(ImageFilter.GaussianBlur(3)))
+        iou = 1.0; pr = _person(r)
+        if pb is not None and pr is not None: iou = float((pb & pr).sum()) / max(1, float((pb | pr).sum()))
+        s = score(r); logging.info("body fix cand %d strength %.2f silhouette IoU %.3f score %s (base %s)", k, st_, iou, s, base)
+        if iou < 0.97: continue
+        if best is None or (s or 0) > best[0]: best = (s or 0, r, iou, st_)
+    if best is None: return im, f"NOT DONE - every version changed the silhouette; original kept ({names})", False
+    if base is not None and best[0] < base: return im, f"NOT DONE - original {names} already scored better ({base:.2f} vs {best[0]:.2f}) - kept", False
+    back = best[1].resize(native.size, Image.LANCZOS); feather = mk.crop(wbox).filter(ImageFilter.MaxFilter(3)).filter(ImageFilter.GaussianBlur(2))
+    out = im.copy(); out.paste(Image.composite(back, native, feather) if im.mode == "RGB" else Image.composite(back, native, feather).convert(im.mode), wbox[:2])
+    return out, (f"Method: limb detail repair ({names}; strength {best[3]:.2f}, silhouette IoU {best[2]:.3f}, score "
+                 f"{(base or 0):.2f} -> {best[0]:.2f}, worked at {ws[0]}x{ws[1]})"), True

@@ -347,11 +347,11 @@ def build_edit_tab(root, nb, send_to_upscale=None, dnd=None, upscale=None):
         if st["img"] is None: status.set("Open an image first."); return
         if st.get("cw") is not None and st["cw"].winfo_exists(): st["cw"].lift(); return
         w = tk.Toplevel(root); w.title("AI change"); sw, sh = w.winfo_screenwidth(), w.winfo_screenheight(); w.geometry(f"{min(int(sw*0.9), 1800)}x{min(int(sh*0.85), 1000)}+20+20"); st["cw"] = w; w.transient(root)
-        cs = {"auto": None, "auto_for": None, "pmax": 0, "img": None, "job": 0, "ph": None}
+        cs = {"auto": None, "auto_for": None, "pmax": 0, "img": None, "job": 0, "ph": None, "add": None, "erase": None, "strokes": [], "view": None}
         rt = ttk.Frame(w); rt.pack(side="right", fill="y", padx=6, pady=6)
         left = ttk.Frame(w); left.pack(side="left", fill="both", expand=True, padx=6, pady=6)
         pv = tk.Canvas(left, bg="#2b2b2b", highlightthickness=0, width=520, height=420); pv.pack(fill="both", expand=True)
-        legend = ttk.Label(left, text="Red = brush (paint on the main Edit picture)   Cyan = auto-mask   No mask = whole image", foreground="#666")
+        legend = ttk.Label(left, text="Cyan = area to change (auto-mask + your Add/Erase strokes; paint here with Edit mask)   Red = brush from the main Edit picture", foreground="#666")
         legend.pack(anchor="w", pady=(4, 0))
         br = ttk.Frame(rt); br.pack(side="bottom", fill="x", pady=(4, 6))     # packed first: the buttons always stay visible
         br2 = ttk.Frame(rt); br2.pack(side="bottom", fill="x", pady=(4, 0))
@@ -369,7 +369,13 @@ def build_edit_tab(root, nb, send_to_upscale=None, dnd=None, upscale=None):
         ttk.Label(mr, text="Grow/Shrink").pack(side="left", padx=(10, 2)); growv = tk.IntVar(value=8)
         ttk.Scale(mr, variable=growv, from_=-30, to=40, length=120, command=lambda v: draw()).pack(side="left")
         glbl = ttk.Label(mr, text="+8 px", width=7); glbl.pack(side="left")
-        ttk.Button(mr, text="Clear auto-mask", command=lambda: (cs.update(auto=None, auto_for=None), draw())).pack(side="left", padx=4)
+        ttk.Button(mr, text="Clear auto-mask", command=lambda: (cs.update(auto=None, auto_for=None, add=None, erase=None, strokes=[]), draw())).pack(side="left", padx=4)
+        er = ttk.Frame(rt); er.pack(fill="x", pady=(2, 2)); penv = tk.StringVar(value="off"); penr = tk.IntVar(value=24)
+        ttk.Label(er, text="Edit mask:").pack(side="left")
+        for _t, _v in (("Off", "off"), ("\u2795 Add", "add"), ("\u2796 Erase", "erase")):
+            ttk.Radiobutton(er, text=_t, value=_v, variable=penv, command=lambda: pv.configure(cursor="circle" if penv.get() != "off" else "")).pack(side="left", padx=2)
+        ttk.Label(er, text="Size").pack(side="left", padx=(8, 2)); ttk.Scale(er, variable=penr, from_=4, to=120, length=100).pack(side="left")
+        ttk.Button(er, text="Undo stroke", command=lambda: undo_stroke()).pack(side="left", padx=4)
         mstat = tk.StringVar(value=""); ttk.Label(rt, textvariable=mstat, foreground="#0a5", wraplength=440).pack(anchor="w")
         sr = ttk.Frame(rt); sr.pack(fill="x", pady=(6, 2)); strv = tk.DoubleVar(value=1.0); strl = ttk.Label(sr, text="", width=24)
         ttk.Label(sr, text="Strength").pack(side="left"); ttk.Scale(sr, variable=strv, from_=0.2, to=1.0, length=180,
@@ -387,6 +393,7 @@ def build_edit_tab(root, nb, send_to_upscale=None, dnd=None, upscale=None):
             ins.delete("1.0", "end"); ins.insert("1.0", txt); apply()
         ttk.Button(br2, text="\U0001F441 Fix eyes", command=lambda: quick_fix("fix eyes")).pack(side="left", padx=2)
         ttk.Button(br2, text="\U0001F642 Fix face", command=lambda: quick_fix("fix face")).pack(side="left", padx=2)
+        ttk.Button(br2, text="\U0001F9CD Fix body", command=lambda: quick_fix("fix arms, hands, legs and feet")).pack(side="left", padx=2)
         ttk.Button(br, text="Undo", command=lambda: (undo(), cs.update(auto=None, auto_for=None), draw())).pack(side="left", padx=2)
         ttk.Button(br, text="Cancel", command=lambda: close()).pack(side="left", padx=2)
         def close():
@@ -397,11 +404,32 @@ def build_edit_tab(root, nb, send_to_upscale=None, dnd=None, upscale=None):
             instr = ins.get("1.0", "end").strip(); tgt, rep, kind = aichange.parse(instr) if instr else (None, "", "global")
             brush_ = st["mask"] is not None and st["mask"].getbbox() is not None
             if brush_: return "brush", tgt, rep, kind, instr
-            if tgt: return "auto", tgt, rep, kind, instr
+            if tgt or edits_on(): return "auto", tgt, rep, kind, instr
             return "whole", tgt, rep, kind, instr
-        def auto_mask():
-            if cs["auto"] is None: return None
-            return aichange.grow(cs["auto"], int(growv.get()))
+        def edits_on():
+            return cs["add"] is not None and (cs["add"].getbbox() is not None or (cs["erase"] is not None and cs["erase"].getbbox() is not None))
+        def auto_mask():   # auto-mask + your Add strokes, grown/shrunk, minus your Erase strokes
+            im_ = st["img"]
+            if cs["add"] is not None and cs["add"].size != im_.size: cs.update(add=None, erase=None, strokes=[])
+            if cs["auto"] is None and not edits_on(): return None
+            from PIL import ImageChops
+            base = cs["auto"] if cs["auto"] is not None and cs["auto"].size == im_.size else Image.new("L", im_.size, 0)
+            if cs["add"] is not None: base = ImageChops.lighter(base, cs["add"])
+            m = aichange.grow(base, int(growv.get()))
+            if cs["erase"] is not None: m = ImageChops.subtract(m, cs["erase"])
+            return m if m.getbbox() else None
+        def paint(e, start=False):
+            if penv.get() == "off" or cs["view"] is None or st["img"] is None: return
+            ox, oy, sc = cs["view"]; im_ = st["img"]; x, y = (e.x - ox) / sc, (e.y - oy) / sc
+            if cs["add"] is None or cs["add"].size != im_.size: cs.update(add=Image.new("L", im_.size, 0), erase=Image.new("L", im_.size, 0), strokes=[])
+            if start: cs["strokes"].append((cs["add"].copy(), cs["erase"].copy()))
+            from PIL import ImageDraw
+            r = max(1, penr.get() / 2 / sc); tgt_, oth = (cs["add"], cs["erase"]) if penv.get() == "add" else (cs["erase"], cs["add"])
+            ImageDraw.Draw(tgt_).ellipse((x - r, y - r, x + r, y + r), fill=255); ImageDraw.Draw(oth).ellipse((x - r, y - r, x + r, y + r), fill=0)
+            if not cs.get("pend"): cs["pend"] = w.after(30, lambda: (cs.update(pend=None), draw()))
+        def undo_stroke():
+            if cs["strokes"]: a_, e_ = cs["strokes"].pop(); cs.update(add=a_, erase=e_); draw()
+        pv.bind("<ButtonPress-1>", lambda e: paint(e, True)); pv.bind("<B1-Motion>", lambda e: paint(e))
         def draw():
             if not w.winfo_exists() or st["img"] is None: return
             glbl.configure(text=f"{int(growv.get()):+d} px")
@@ -413,6 +441,7 @@ def build_edit_tab(root, nb, send_to_upscale=None, dnd=None, upscale=None):
                 p = Image.composite(Image.blend(p, Image.new("RGB", p.size, (0, 220, 255)), 0.5), p, am.resize(p.size, Image.NEAREST))
             if st["mask"] is not None and st["mask"].getbbox():
                 p = Image.composite(Image.blend(p, Image.new("RGB", p.size, (255, 40, 40)), 0.5), p, st["mask"].resize(p.size, Image.NEAREST))
+            cs["view"] = ((W_ - tw) // 2, (H_ - th) // 2, s_)
             cs["ph"] = ImageTk.PhotoImage(p); pv.delete("all"); pv.create_image((W_ - tw) // 2, (H_ - th) // 2, anchor="nw", image=cs["ph"])
             mode = cur_mode()[0]
             mstat.set({"brush": "Area: your brush mask (only the red area changes).",
@@ -452,7 +481,9 @@ def build_edit_tab(root, nb, send_to_upscale=None, dnd=None, upscale=None):
                     def done():
                         cs.update(auto=m, auto_for=(id(im), instr), pmax=pm); draw()
                         if pm < 0.2 or not m.getbbox():
-                            cs.update(auto=None); draw(); wst.set(f"Couldn't find '{tgt}' (confidence {pm:.2f}): brush it or click Find target. Nothing was changed."); return
+                            cs.update(auto=None, auto_for=(id(im), instr)); draw()
+                            if then and edits_on(): then(); return   # your Add strokes are the area
+                            wst.set(f"Couldn't find '{tgt}' (confidence {pm:.2f}): paint it with Edit mask > Add, or brush it. Nothing was changed."); return
                         else:
                             mm = methv.get() if methv.get() != "Auto" else aichange.method_for(aichange.parse(instr)[1])
                             wst.set(f"Found '{tgt}' with {how} in {dt:.2f}s. Method: {'redraw (inpaint)' if mm == 'Redraw' else 'recolor (pix2pix)'}. Adjust Grow/Shrink or brush, then Apply.")
@@ -466,14 +497,16 @@ def build_edit_tab(root, nb, send_to_upscale=None, dnd=None, upscale=None):
             mode, tgt, rep, kind, instr = cur_mode()
             if not instr: wst.set("Type what you want to change."); return
             try:
-                import facefix; _fix = facefix.fix_what(instr)
-            except Exception: _fix = None
+                import facefix; _fix = facefix.fix_what(instr); _bfix = facefix.body_fix(instr); _blk = facefix.reshape_block(instr)
+            except Exception: _fix = _bfix = _blk = None
+            if _blk: wst.set(_blk); return
+            if _bfix: mode = "whole"   # limb repair finds the limbs itself
             if _fix: mode = "whole"   # "fix eyes"/"fix face": the detailer finds the faces itself
-            elif mode == "auto" and cs.get("auto_for") != (id(st["img"]), instr): find(then=apply); return
+            elif mode == "auto" and tgt and cs.get("auto_for") != (id(st["img"]), instr): find(then=apply); return
             im = st["img"]; analysis = ana.get("1.0", "end").strip()
             mask = st["mask"] if mode == "brush" else (auto_mask() if mode == "auto" else None)
             if mode == "auto" and (mask is None or not mask.getbbox()): wst.set("Target not found - paint it with the brush."); return
-            if mode == "whole" and not _fix and not aichange.is_global(instr):
+            if mode == "whole" and not _fix and not _bfix and not aichange.is_global(instr):
                 wst.set("Couldn't tell what to change. Name the thing (e.g. 'change outfit to a red dress'), brush it, "
                         "or say 'whole image' for a whole-picture change. Nothing was changed."); return
             strength = float(strv.get()); job = cs["job"] = cs["job"] + 1
@@ -495,7 +528,7 @@ def build_edit_tab(root, nb, send_to_upscale=None, dnd=None, upscale=None):
                         if job != cs["job"]: return
                         if res is not im: push(res, f"AI change done in {dt:.1f}s ({how} on {dv})")
                         if w.winfo_exists() and res is im: pused.set(p); wst.set(f"{how} ({dt:.1f}s) - picture unchanged."); return
-                        if w.winfo_exists(): pused.set(p); wst.set(f"Done in {dt:.1f}s - {how} on {dv}. Undo to revert."); cs.update(auto=None, auto_for=None); draw()
+                        if w.winfo_exists(): pused.set(p); wst.set(f"Done in {dt:.1f}s - {how} on {dv}. Undo to revert."); cs.update(auto=None, auto_for=None, add=None, erase=None, strokes=[]); draw()
                         if w.winfo_exists() and res is not im: eng["ana"].clear(); analyze(force=True)  # the picture changed: describe the new one
                     ui(done)
                 except Exception as e:

@@ -1,7 +1,7 @@
 // NpuStudio Companion web UI. Served by the desktop at /app; the Android shell (window.NpuShell) is optional.
 "use strict";
 const $ = id => document.getElementById(id);
-const UI_VERSION = "1.6.3";
+const UI_VERSION = "1.6.5";
 const Shell = window.NpuShell || null;
 const shellVersion = Shell && Shell.shellVersion ? Number(Shell.shellVersion()) : 0;
 
@@ -347,11 +347,29 @@ function clearMask() { const cv = $("maskCv"); cv.getContext("2d").clearRect(0, 
 $("maskClear").onclick = clearMask;
 function dab(e) {
   const cv = $("maskCv"), r = cv.getBoundingClientRect(), s = cv.width / r.width, x = cv.getContext("2d");
-  x.fillStyle = "#ff2040"; x.beginPath(); x.arc((e.clientX - r.left) * s, (e.clientY - r.top) * s, (+$("brush").value / 2) * s, 0, 7); x.fill(); cv.dataset.dirty = "1";
+  x.globalCompositeOperation = $("penErase").checked ? "destination-out" : "source-over";
+  x.fillStyle = "#00dcff"; x.beginPath(); x.arc((e.clientX - r.left) * s, (e.clientY - r.top) * s, (+$("brush").value / 2) * s, 0, 7); x.fill();
+  x.globalCompositeOperation = "source-over"; cv.dataset.dirty = "1";
 }
-$("maskCv").addEventListener("pointerdown", e => { painting = true; $("maskCv").setPointerCapture(e.pointerId); dab(e); });
+const strokes = [];
+$("maskCv").addEventListener("pointerdown", e => { const cv = $("maskCv"); strokes.push(cv.getContext("2d").getImageData(0, 0, cv.width, cv.height)); if (strokes.length > 20) strokes.shift(); painting = true; $("maskCv").setPointerCapture(e.pointerId); dab(e); });
 $("maskCv").addEventListener("pointermove", e => { if (painting) dab(e); });
 ["pointerup", "pointercancel"].forEach(t => $("maskCv").addEventListener(t, () => painting = false));
+$("maskUndo").onclick = () => { const d = strokes.pop(); if (d) { const cv = $("maskCv"); cv.getContext("2d").putImageData(d, 0, 0); } };
+["penAdd", "penErase"].forEach(id => $(id).onchange = () => { $("brOn").checked = true; $("brOn").onchange(); });
+// Load the auto-mask (cyan) onto the brush layer so it can be fixed with Add / Erase before AI Change
+$("maskAuto").onclick = async () => {
+  const instr = $("editInstr").value.trim(); if (!ED.cur) return notice("Pick a photo first."); if (!instr) return notice("Type what to change first (e.g. 'change the outfit to a red dress').");
+  const r = await runJob({ type: "find_mask", image: curB64(), instruction: instr }, $("editJob"), "Find target", { done: (r, s) => r.mask ? `Found (${r.conf}) - ${r.how}` : `Not found - ${r.how}` });
+  if (!r || !r.mask) return;
+  const m = await loadImg("data:image/png;base64," + r.mask), cv = $("maskCv"), x = cv.getContext("2d");
+  const t = document.createElement("canvas"); t.width = cv.width; t.height = cv.height; const tx = t.getContext("2d"); tx.drawImage(m, 0, 0, t.width, t.height);
+  const d = tx.getImageData(0, 0, t.width, t.height), o = x.getImageData(0, 0, cv.width, cv.height);
+  strokes.push(x.getImageData(0, 0, cv.width, cv.height));
+  for (let i = 0; i < d.data.length; i += 4) if (d.data[i] > 127) { o.data[i] = 0; o.data[i + 1] = 220; o.data[i + 2] = 255; o.data[i + 3] = 255; }
+  x.putImageData(o, 0, 0); cv.dataset.dirty = "1"; $("brOn").checked = true; $("brOn").onchange();
+  $("editOut").innerHTML = `<p class="muted small">Cyan = area that will change. Use ➕ Add / ➖ Erase to fix it, then tap AI Change.</p>`;
+};
 function maskB64() {
   const cv = $("maskCv"); if (!cv.dataset.dirty) return null;
   const m = document.createElement("canvas"); m.width = cv.width; m.height = cv.height; const x = m.getContext("2d");
@@ -392,7 +410,7 @@ $("editBg").onclick = () => editJob({ type: "remove_bg", image: curB64() }, "Rem
 $("editStr").oninput = () => $("stV").textContent = (+$("editStr").value).toFixed(2);
 $("editGrow").oninput = () => $("grV").textContent = (+$("editGrow").value > 0 ? "+" : "") + $("editGrow").value;
 $("editWhole").onchange = () => { $("editStr").value = $("editWhole").checked ? 0.4 : 1; $("editStr").oninput(); };
-["editFixEyes", "editFixFace"].forEach(id => $(id).onclick = () => { $("editInstr").value = id === "editFixEyes" ? "fix eyes" : "fix face"; $("editGo").click(); });
+["editFixEyes", "editFixFace", "editFixBody"].forEach(id => $(id) && ($(id).onclick = () => { $("editInstr").value = { editFixEyes: "fix eyes", editFixFace: "fix face", editFixBody: "fix arms, hands, legs and feet" }[id]; $("editGo").click(); }));
 $("editGo").onclick = () => {
   const instr = $("editInstr").value.trim(); if (!instr) return $("editInstr").focus();
   const m = $("editWhole").checked ? null : maskB64();
