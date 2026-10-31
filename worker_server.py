@@ -147,6 +147,8 @@ class H(BaseHTTPRequestHandler):
         if self.path.split("?")[0].rstrip("/") in ("/app", "") or self.path.startswith("/app/"):
             return serve_app(self)   # the mobile web UI holds no secrets; its API calls carry the key
         if not self._ok(): return self._send(403, {"error": "bad key"})
+        try: note_client(self)
+        except Exception: pass
         p = self.path.split("?")[0].strip("/").split("/")
         if p[:2] == ["api", "v1"]: return api_get(self, p[2:])
         if p[0] == "health": return self._send(200, gpu_info())
@@ -161,6 +163,8 @@ class H(BaseHTTPRequestHandler):
         self._send(404, {"error": "not found"})
     def do_POST(self):
         if not self._ok(): return self._send(403, {"error": "bad key"})
+        try: note_client(self)
+        except Exception: pass
         data = self.rfile.read(int(self.headers.get("Content-Length", 0)))
         p = self.path.split("?")[0].strip("/").split("/")
         if p[:2] == ["api", "v1"]: return api_post(self, p[2:], data)
@@ -356,10 +360,37 @@ def monitor():
 # ---- device mesh: phones (Companion v2.1 background link long-polls), the laptop (reports every 3 s), this desktop ----
 _phones = {}            # id -> {"name", "seen", "via", "q": [cmd], "res": {cid: text}}
 _pcv = threading.Condition()
+PHONES_F = os.path.join(MD, "phones.json"); _psave = [0.0]
 def _ph(pid, name=None):
     p = _phones.setdefault(pid, {"name": name or "Phone", "seen": 0.0, "via": None, "q": []})
     if name: p["name"] = name
     return p
+def _phones_save(force=False):
+    if not force and time.time() - _psave[0] < 30: return
+    _psave[0] = time.time()
+    try: json.dump({k: {x: p.get(x) for x in ("name", "seen", "ver", "how")} for k, p in _phones.items() if k != "phone"}, open(PHONES_F, "w"), indent=1)
+    except Exception as e: logging.debug("phones save: %s", e)
+def _phones_load():
+    try:
+        for k, v in json.load(open(PHONES_F)).items():
+            p = _ph(k, v.get("name")); p["seen"] = float(v.get("seen") or 0); p["ver"] = v.get("ver"); p["how"] = v.get("how")
+    except Exception: pass
+def note_client(h):
+    """Any authorised request from the phone app/web UI registers that phone (not only the v2.1 background service)."""
+    if SHARE: return
+    ua = h.headers.get("User-Agent", ""); pid = (h.headers.get("X-Device-Id") or "")[:64]
+    if "Android" not in ua and not pid: return
+    if not pid:
+        import hashlib; pid = "ua-" + hashlib.sha1((ua + h.client_address[0]).encode()).hexdigest()[:8]
+    import re; m = re.search(r"Android [\d.]+; ([^;)]+?)(?: Build|\))", ua)
+    name = (h.headers.get("X-Device-Name") or (m.group(1).strip() if m else "Android phone"))[:40]
+    with _pcv:
+        new = pid not in _phones; p = _ph(pid, name); p["seen"] = time.time()
+        p["via"] = "remote" if h.client_address[0].startswith("100.") else "home"
+        v = h.headers.get("X-Shell-Version")
+        if v: p["ver"] = v
+        p.setdefault("how", "web")
+    _phones_save(new)
 def phone_status(pid=None):
     ps = [p for k, p in _phones.items() if pid in (None, k)]
     p = max(ps, key=lambda x: x["seen"]) if ps else None
@@ -371,13 +402,13 @@ def phone_poll(h, q):
     pid = (q.get("id") or ["phone"])[0][:64]; name = (q.get("name") or [None])[0]
     end = time.time() + wait
     with _pcv:
-        p = _ph(pid, name and name[:40]); p["via"] = "remote" if h.client_address[0].startswith("100.") else "home"
+        p = _ph(pid, name and name[:40]); p["via"] = "remote" if h.client_address[0].startswith("100.") else "home"; p["how"] = "service"
         while True:
             p["seen"] = time.time()
             if p["q"] or time.time() >= end: break
             _pcv.wait(min(5, end - time.time()))
         cmds, p["q"] = p["q"], []
-    p["seen"] = time.time()
+    p["seen"] = time.time(); _phones_save()
     return h._send(200, {"commands": cmds})
 _phone_res = {}
 def phone_queue(name, args=None, pid=None, wait=0):
@@ -401,8 +432,16 @@ def devices():
     except Exception: pass
     for k, p in sorted(_phones.items()):
         if k == "phone" and len(_phones) > 1 and not p["seen"]: continue
+        if p.get("how") == "web":   # same phone seen by its background link (or a newer id) -> one entry
+            twin = [q for q in _phones.values() if q is not p and (q.get("how") == "service" and q["name"].endswith(p["name"]) or q["name"] == p["name"] and q["seen"] >= p["seen"])]
+            if twin:
+                for q in twin:
+                    if p.get("ver") and not q.get("ver"): q["ver"] = p["ver"]
+                    q["seen"] = max(q["seen"], p["seen"])
+                continue
         ago = time.time() - p["seen"] if p["seen"] else None
-        out.append({"id": "phone:" + k, "name": p["name"], "kind": "phone", "online": ago is not None and ago < 75, "last_seen_s": round(ago, 1) if ago is not None else None})
+        out.append({"id": "phone:" + k, "name": p["name"], "kind": "phone", "online": ago is not None and ago < 75, "last_seen_s": round(ago, 1) if ago is not None else None,
+                    "app": p.get("ver"), "link": p.get("how") == "service"})
     return out
 def laptop_action(a):
     """Run an (already confirmed) PC action on the laptop's share server."""
@@ -529,6 +568,7 @@ def _parent_watch(pid):
     k.WaitForSingleObject(h, 0xFFFFFFFF); os._exit(0)
 
 SHARE = "--share" in sys.argv
+if not SHARE: _phones_load()
 if __name__ == "__main__":
     if SHARE:   # laptop: share this PC's chips with the paired desktop, using the same pairing key (models/remote.json)
         logging.getLogger().handlers[0].setFormatter(logging.Formatter("%(asctime)s %(levelname)s [share] %(message)s"))

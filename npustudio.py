@@ -527,22 +527,28 @@ def build_chat_tab(root, nb, demo=None):
     def thint(_=None):
         d = tmap.get(tgt.get()); hintv.set(HINT_PH if d and d.startswith("phone:") else (HINT_PC if not d else HINT_PC.replace("Things I can do:", f"Runs on {tgt.get().split(' (')[0]}:")))
     tbox.bind("<<ComboboxSelected>>", thint); thint()
-    def load_targets():
+    def load_targets(again=True):
         def w():
-            try:
-                import phonelink, remote; devs = phonelink.devices(); me = "laptop" if remote.role() == "laptop" else "desktop"
-                m = {"This PC": None}
-                for d in devs:
-                    if d["id"] == me: continue
-                    lab = ("\U0001f4f1 " if d["kind"] == "phone" else "\U0001f5a5 ") + ("Desktop PC" if d["id"] == "desktop" else d["name"]) + ("" if d["online"] else " (offline)")
-                    m[lab] = "pc" if d["id"] == "desktop" else d["id"]
-                def apply():
-                    tmap.clear(); tmap.update(m); tbox.configure(values=list(m))
-                    if tgt.get() not in m: tgt.set("This PC")
-                    thint()
-                ui(apply)
-            except Exception as e: logging.debug("targets: %s", e)
-        threading.Thread(target=w, daemon=True).start(); root.after(20000, load_targets)
+            import phonelink, remote
+            me = "laptop" if remote.role() == "laptop" else "desktop"
+            try: devs = phonelink.devices()
+            except Exception as e:
+                logging.info("Control picker: device list unavailable: %s", e); devs = []
+            if me == "laptop" and not any(d["id"] == "desktop" for d in devs):   # always offer the desktop, even when unreachable
+                devs.insert(0, {"id": "desktop", "name": "Desktop PC", "kind": "pc", "online": False})
+            m = {"This PC": None}
+            for d in devs:
+                if d["id"] == me: continue
+                lab = ("\U0001f4f1 " if d["kind"] == "phone" else "\U0001f5a5 ") + ("Desktop PC" if d["id"] == "desktop" else d["name"]) + ("" if d["online"] else " (offline)")
+                m[lab] = "pc" if d["id"] == "desktop" else d["id"]
+            def apply():
+                cur = tmap.get(tgt.get()); tmap.clear(); tmap.update(m); tbox.configure(values=list(m))
+                keep = [k for k, v in m.items() if v == cur]
+                tgt.set(keep[0] if keep else "This PC"); thint()
+            ui(apply)
+        threading.Thread(target=w, daemon=True).start()
+        if again: root.after(15000, load_targets)
+    tbox.configure(postcommand=lambda: load_targets(False))
     root.after(1500, load_targets)
     ent = ttk.Entry(bot, font=("Segoe UI", 11)); ent.pack(side="left", fill="x", expand=True)
     ttk.Label(f, textvariable=hintv, foreground="#666", wraplength=1500, justify="left").pack(anchor="w", padx=6, before=bot)

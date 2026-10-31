@@ -1,7 +1,7 @@
 // NpuStudio Companion web UI. Served by the desktop at /app; the Android shell (window.NpuShell) is optional.
 "use strict";
 const $ = id => document.getElementById(id);
-const UI_VERSION = "1.6.0";
+const UI_VERSION = "1.6.1";
 const Shell = window.NpuShell || null;
 const shellVersion = Shell && Shell.shellVersion ? Number(Shell.shellVersion()) : 0;
 
@@ -14,10 +14,20 @@ const shellVersion = Shell && Shell.shellVersion ? Number(Shell.shellVersion()) 
 const key = () => localStorage.getItem("npuKey") || "";
 
 // ---------- API ----------
+// Identify this phone to the desktop so it shows in every Control picker (same id as the v2.1 background link).
+function devHeaders() {
+  if (!/Android/.test(navigator.userAgent)) return {};
+  let id = null, name = null;
+  try { if (typeof Shell !== "undefined" && Shell && Shell.getBackground) { const b = JSON.parse(Shell.getBackground()); id = b.id; name = b.name; } } catch (e) {}
+  if (!id) { id = localStorage.getItem("npuDevId") || ("w" + Math.random().toString(36).slice(2, 9)); localStorage.setItem("npuDevId", id); }
+  const h = { "X-Device-Id": id }; if (name) h["X-Device-Name"] = name;
+  try { if (typeof shellVersion !== "undefined" && shellVersion) h["X-Shell-Version"] = String(shellVersion); } catch (e) {}
+  return h;
+}
 async function api(path, body, method) {
   const r = await fetch("/api/v1/" + path, {
     method: method || (body !== undefined ? "POST" : "GET"),
-    headers: { "X-Key": key(), "Content-Type": "application/json" },
+    headers: { "X-Key": key(), "Content-Type": "application/json", ...devHeaders() },
     body: body !== undefined ? JSON.stringify(body) : undefined, cache: "no-store"
   });
   let d = {}; try { d = await r.json(); } catch (e) {}
@@ -212,7 +222,7 @@ const HINTS = {
 };
 (function chatSetup() {
   const sel = $("chatTarget");
-  let me = null; try { me = Shell && Shell.getBackground ? JSON.parse(Shell.getBackground()).id : null; } catch (e) {}
+  const me = devHeaders()["X-Device-Id"] || null;
   const hint = () => { const v = sel.value; $("chatHint").textContent = v === "phone" ? HINTS.phone : v.startsWith("phone:") ? HINTS.remotephone : HINTS.pc; };
   const fill = devs => {
     const want = localStorage.getItem("npuTarget") || (Shell ? "phone" : "pc"); sel.innerHTML = "";
@@ -226,6 +236,7 @@ const HINTS = {
   };
   const load = async () => { try { const r = await api("devices"); if (r && r.devices) fill(r.devices); } catch (e) {} };
   fill([{ id: "desktop", name: "Desktop PC", kind: "pc", online: true }]); load(); setInterval(load, 20000);
+  sel.addEventListener("focus", load); sel.addEventListener("mousedown", load);
   sel.onchange = () => { localStorage.setItem("npuTarget", sel.value); hint(); };
 })();
 async function shellUpdateCheck() {

@@ -5,6 +5,10 @@ CMDS = {"find_phone", "stop_sound"}          # the only things the PC may push t
 
 def _desk():
     srv = os.path.join(APP, "models", "remote_server.json"); cli = os.path.join(APP, "models", "remote.json")
+    try:   # the laptop also has remote_server.json (its own share server); the device mesh lives on the desktop, so prefer remote.json
+        c = json.load(open(cli))
+        if c.get("host"): return c["host"], c.get("port", 47860), c["key"]
+    except Exception: pass
     if os.path.exists(srv): c = json.load(open(srv)); return "127.0.0.1", c.get("port", 47860), c["key"]
     if os.path.exists(cli): c = json.load(open(cli)); return c["host"], c.get("port", 47860), c["key"]
     raise RuntimeError("This PC isn't the desktop server and isn't linked to one.")
