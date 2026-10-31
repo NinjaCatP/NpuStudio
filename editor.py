@@ -381,6 +381,10 @@ def build_edit_tab(root, nb, send_to_upscale=None, dnd=None, upscale=None):
         ttk.Label(rt, textvariable=wst, wraplength=440).pack(anchor="w")
         br = ttk.Frame(rt); br.pack(fill="x", pady=6)
         apb = ttk.Button(br, text="Apply", command=lambda: apply()); apb.pack(side="left", padx=2)
+        def quick_fix(txt):   # same detailer path as typing "fix eyes"/"fix face" (only pastes when it scores better)
+            ins.delete("1.0", "end"); ins.insert("1.0", txt); apply()
+        ttk.Button(br, text="\U0001F441 Fix eyes", command=lambda: quick_fix("fix eyes")).pack(side="left", padx=2)
+        ttk.Button(br, text="\U0001F642 Fix face", command=lambda: quick_fix("fix face")).pack(side="left", padx=2)
         ttk.Button(br, text="Undo", command=lambda: (undo(), cs.update(auto=None, auto_for=None), draw())).pack(side="left", padx=2)
         ttk.Button(br, text="Cancel", command=lambda: close()).pack(side="left", padx=2)
         def close():
@@ -481,12 +485,14 @@ def build_edit_tab(root, nb, send_to_upscale=None, dnd=None, upscale=None):
                         res, dev, how, p = c.edit_masked(ai, im, mask, instr, analysis, strength=max(0.5, strength), progress=prog, status=wset, upscaler=upscale, method=methv.get())
                     else:
                         res, dev, how, p = c.edit_whole(im, instr, analysis, strength=min(strength, 0.6), progress=prog, status=wset, upscaler=upscale)
-                    import outputs; outputs.autosave(res, "aichange", instr)
+                    import outputs
+                    if res is not im: outputs.autosave(res, "edit" if _fix else "aichange", instr)   # detailer fixes go to output\edit\<date>
                     dt = time.time() - t; dv = dev if isinstance(dev, str) else "/".join(dict.fromkeys(dev))
                     logging.info("AI change '%s' mode=%s how=%s dev=%s %.1fs prompt=%s", instr, mode, how, dv, dt, p)
                     def done():
                         if job != cs["job"]: return
-                        push(res, f"AI change done in {dt:.1f}s ({how} on {dv})")
+                        if res is not im: push(res, f"AI change done in {dt:.1f}s ({how} on {dv})")
+                        if w.winfo_exists() and res is im: pused.set(p); wst.set(f"{how} ({dt:.1f}s) - picture unchanged."); return
                         if w.winfo_exists(): pused.set(p); wst.set(f"Done in {dt:.1f}s - {how} on {dv}. Undo to revert."); cs.update(auto=None, auto_for=None); draw()
                         if w.winfo_exists() and res is not im: eng["ana"].clear(); analyze(force=True)  # the picture changed: describe the new one
                     ui(done)
