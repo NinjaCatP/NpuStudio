@@ -1,7 +1,7 @@
 // NpuStudio Companion web UI. Served by the desktop at /app; the Android shell (window.NpuShell) is optional.
 "use strict";
 const $ = id => document.getElementById(id);
-const UI_VERSION = "1.2.0";
+const UI_VERSION = "1.3.0";
 const Shell = window.NpuShell || null;
 const shellVersion = Shell && Shell.shellVersion ? Number(Shell.shellVersion()) : 0;
 
@@ -32,22 +32,46 @@ function notifyDone(title, text) {
   else if (window.Notification && Notification.permission === "granted") new Notification(title, { body: text });
 }
 
-// Runs a job with a progress card (bar, message, Cancel). onUpdate(status) for streaming text; onConfirm(q)->bool.
+// XHR so the card can show upload / download percentages.
+function xhrJson(method, path, body, onProg) {
+  return new Promise((res, rej) => {
+    const x = new XMLHttpRequest(); x.open(method, "/api/v1/" + path); x.setRequestHeader("X-Key", key());
+    if (body !== undefined) x.setRequestHeader("Content-Type", "application/json");
+    if (onProg) { x.upload.onprogress = e => e.lengthComputable && onProg("up", e.loaded / e.total); x.onprogress = e => onProg("down", e.lengthComputable ? e.loaded / e.total : -e.loaded); }
+    x.onload = () => { let d = {}; try { d = JSON.parse(x.responseText); } catch (e) {}
+      if (x.status >= 200 && x.status < 300) res(d); else { const e = new Error(d.error || ("HTTP " + x.status)); e.status = x.status; rej(e); } };
+    x.onerror = () => rej(new Error("Network error - is the desktop reachable?"));
+    x.send(body !== undefined ? JSON.stringify(body) : null);
+  });
+}
+const fmtMB = n => n < 1048576 ? Math.max(1, Math.round(n / 1024)) + " KB" : (n / 1048576).toFixed(n < 10485760 ? 1 : 0) + " MB";
+// Runs a job with a status card: Preparing → Uploading x% → Starting → server message + progress → Downloading result → Done / error.
+// body may be an object or an async function returning one (e.g. shrinking a photo). opts: onUpdate(status), btn (disabled while running),
+// done(r) -> text for the "Done" line (card stays), keep (leave the Done line visible).
 async function runJob(body, box, label, opts = {}) {
   const card = document.createElement("div"); card.className = "job";
-  card.innerHTML = `<div class="row"><b class="grow">${label}</b><button class="ghost danger">Cancel</button></div><div class="bar ind"><i></i></div><div class="muted small msg"></div>`;
+  card.innerHTML = `<div class="row"><b class="grow">${label}</b><span class="muted small el"></span><button class="ghost danger">Cancel</button></div><div class="bar ind"><i></i></div><div class="small msg st"></div>`;
   if (box) { box.innerHTML = ""; box.appendChild(card); }
-  const bar = card.querySelector(".bar"), msg = card.querySelector(".msg"), cancel = card.querySelector("button");
-  const t0 = Date.now(); let id, cancelled = false, confirming = false;
+  const bar = card.querySelector(".bar"), msg = card.querySelector(".msg"), cancel = card.querySelector("button"), el = card.querySelector(".el");
+  const setBar = f => { if (f == null) bar.classList.add("ind"); else { bar.classList.remove("ind"); bar.firstChild.style.width = Math.round(100 * Math.max(0, Math.min(1, f))) + "%"; } };
+  const t0 = Date.now(); let id, cancelled = false, confirming = false, phase = "Preparing…";
+  const tick = setInterval(() => { el.textContent = ((Date.now() - t0) / 1000).toFixed(0) + " s"; }, 500);
+  const say = t => { if (!cancelled) msg.textContent = t; };
+  if (opts.btn) opts.btn.disabled = true;
   cancel.onclick = async () => { cancelled = true; cancel.disabled = true; msg.textContent = "Cancelling…"; if (id) try { await api(`jobs/${id}/cancel`, {}); } catch (e) {} };
   try {
-    id = (await api("jobs", body)).id;
+    say("Preparing…");
+    if (typeof body === "function") body = await body();
+    if (cancelled) throw Object.assign(new Error("cancelled"), { status: 410 });
+    const size = JSON.stringify(body).length;
+    say(size > 200000 ? `Uploading ${fmtMB(size)}… 0%` : "Sending…"); setBar(size > 200000 ? 0 : null);
+    id = (await xhrJson("POST", "jobs", body, (k, f) => { if (k === "up") { say(`Uploading ${fmtMB(size)}… ${Math.round(f * 100)}%`); setBar(f); } })).id;
+    say("Queued - waiting for the desktop to start…"); setBar(null);
     while (true) {
       await sleep(600);
       const s = await api("jobs/" + id);
-      if (s.total > 0) { bar.classList.remove("ind"); bar.firstChild.style.width = (100 * s.progress / s.total) + "%"; }
-      const secs = ((Date.now() - t0) / 1000).toFixed(0);
-      if (!cancelled) msg.textContent = (s.message || "working…") + ` · ${secs}s`;
+      if (s.total > 0) setBar(s.progress / s.total); else setBar(null);
+      say((s.message || "Starting…") + (s.total > 0 ? ` (${Math.round(100 * s.progress / s.total)}%)` : ""));
       if (opts.onUpdate) opts.onUpdate(s);
       if (s.state === "confirm" && !confirming) {
         confirming = true;
@@ -57,14 +81,20 @@ async function runJob(body, box, label, opts = {}) {
       }
       if (s.state === "done" || s.state === "error" || s.state === "cancelled") break;
     }
-    const r = await api(`jobs/${id}/result`);
-    card.remove(); notifyDone("NpuStudio: " + label + " done", `Finished in ${r.seconds || "?"} s`);
+    say("Downloading result…"); setBar(null);
+    const r = await xhrJson("GET", `jobs/${id}/result`, undefined, (k, f) => { if (k === "down") { if (f >= 0) { setBar(f); say(`Downloading result… ${Math.round(f * 100)}%`); } else say(`Downloading result… ${fmtMB(-f)}`); } });
+    clearInterval(tick); cancel.remove(); bar.remove();
+    const secs = ((Date.now() - t0) / 1000).toFixed(1);
+    if (opts.done || opts.keep) { msg.className = "small msg ok"; msg.textContent = "✓ " + (opts.done ? opts.done(r, secs) : `Done in ${secs} s`); el.textContent = ""; }
+    else card.remove();
+    notifyDone("NpuStudio: " + label + " done", `Finished in ${secs} s`);
     return r;
   } catch (e) {
-    if (e.status === 410 || cancelled) { msg.textContent = "Cancelled."; bar.remove(); cancel.remove(); return null; }
-    msg.innerHTML = `<span class="err">${esc(e.message)}</span>`; bar.remove(); cancel.remove();
+    clearInterval(tick); bar.remove(); cancel.remove();
+    if (e.status === 410 || cancelled) { msg.textContent = "Cancelled."; return null; }
+    msg.innerHTML = `<span class="err">⚠ ${esc(e.message)}</span>`;
     notifyDone("NpuStudio: " + label + " failed", e.message); return null;
-  }
+  } finally { if (opts.btn) opts.btn.disabled = false; }
 }
 const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
@@ -128,11 +158,12 @@ function addMsg(cls, text) { const d = document.createElement("div"); d.classNam
 async function chatSend() {
   const m = $("chatIn").value.trim(); if (!m) return;
   $("chatIn").value = ""; addMsg("me", m); $("chatSend").disabled = true;
-  const bot = addMsg("bot", "…"); const box = document.createElement("div"); $("chatLog").appendChild(box);
+  const bot = addMsg("bot", "Thinking…"); bot.classList.add("thinking"); const box = document.createElement("div"); $("chatLog").appendChild(box);
   const target = $("chatTarget").value;
-  const r = await runJob({ type: "chat", message: m, device: target }, box, "Reply", { onUpdate: s => { if (s.text) bot.textContent = s.text; } });
+  const r = await runJob({ type: "chat", message: m, device: target }, box, "Reply", { onUpdate: s => { if (s.text) { bot.textContent = s.text; bot.classList.remove("thinking"); } } });
+  bot.classList.remove("thinking");
   box.remove(); $("chatSend").disabled = false;
-  if (!r) { if (bot.textContent === "…") bot.textContent = "(no reply)"; return; }
+  if (!r) { if (bot.textContent === "Thinking…") bot.textContent = "(no reply)"; return; }
   bot.textContent = r.text || bot.textContent;
   if (r.phone_action) {
     const pa = r.phone_action, a = document.createElement("div"); a.className = "act"; bot.appendChild(a);
@@ -203,9 +234,8 @@ $("genGo").onclick = async () => {
   const p = $("genPrompt").value.trim(); if (!p) return $("genPrompt").focus();
   const [w, h] = genTarget();
   if (!(w >= 64 && h >= 64 && w <= 16384 && h <= 16384)) return alert("Size must be between 64 and 16384 on each side.");
-  $("genGo").disabled = true;
-  const r = await runJob({ type: "gen", prompt: p, width: w, height: h, steps: +$("genSteps").value || 4, seed: +$("genSeed").value || 0, upscaler: $("genUp").value }, $("genJob"), "Image Gen");
-  $("genGo").disabled = false;
+  const r = await runJob({ type: "gen", prompt: p, width: w, height: h, steps: +$("genSteps").value || 4, seed: +$("genSeed").value || 0, upscaler: $("genUp").value }, $("genJob"), "Image Gen",
+    { btn: $("genGo"), done: (r, s) => `Done in ${s} s · ${w}×${h}` });
   if (r) { showResult($("genOut"), r, "npustudio-gen", `· ${w}×${h}`); addSend($("genOut"), r.image); }
 };
 function addSend(box, b64) {
@@ -292,7 +322,7 @@ const curB64 = () => ED.cur.split(",")[1];
 async function editJob(body, label) {
   if (!ED.cur) return alert("Pick a photo first.");
   document.querySelectorAll("#editTools button").forEach(b => b.disabled = true);
-  const r = await runJob(body, $("editJob"), label);
+  const r = await runJob(body, $("editJob"), label, { done: (r, s) => `${label} done in ${s} s${r.device ? " on " + r.device : ""}` });
   document.querySelectorAll("#editTools button").forEach(b => b.disabled = false);
   if (r) { pushEdit("data:image/png;base64," + r.image); $("editOut").innerHTML = `<p class="muted small">${esc(label)} done on ${esc(r.device || "")} in ${r.seconds || "?"} s${r.method ? " · " + esc(r.method) : ""}. Undo to revert.</p>`; }
 }
@@ -319,9 +349,31 @@ document.querySelectorAll("#upScale button").forEach(b => b.onclick = () => {
 });
 $("upPick").onclick = async () => { const d = await pickImage(); if (d) upLoad(d); };
 let upChk = null;
+// "Limit to my screen": cap the result at the phone's native resolution (long edge vs long edge, so either orientation fits).
+$("upScreen").checked = localStorage.getItem("npuUpScreen") !== "0";
+$("upScreen").onchange = () => { localStorage.setItem("npuUpScreen", $("upScreen").checked ? "1" : "0"); upEstimate(); };
+function screenPx() { const d = window.devicePixelRatio || 1, a = Math.round(screen.width * d), b = Math.round(screen.height * d); return [Math.max(a, b), Math.min(a, b)]; }
+$("upScreenSz").textContent = "(" + screenPx().join("×") + ")";
+// -> {scale, w, h, limited, already}: the smallest model pass that reaches the screen size; the server resizes the result to fit.
+function upPlan() {
+  const sc = upScale; if (!upDim) return null;
+  const [w, h] = upDim, full = { scale: sc, w: w * sc, h: h * sc, limited: false, already: false };
+  if (!$("upScreen").checked) return full;
+  const [L, S] = screenPx(), f = Math.min(L / Math.max(w, h), S / Math.min(w, h));
+  if (f <= 1) return { scale: 0, w, h, limited: true, already: true };
+  if (f >= sc) return full;
+  const need = [2, 4, 8, 16].find(x => x >= f) || 16;
+  return { scale: Math.min(sc, need), w: Math.round(w * f), h: Math.round(h * f), limited: true, already: false };
+}
 async function upEstimate() {
+  const p = upPlan();
+  $("upPlan").innerHTML = !p ? "" : p.already
+    ? `⚠ This picture (${p.w}×${p.h}) is already at or above your screen size. <a href="#" id="upOff">Turn off the screen limit</a> to upscale anyway.`
+    : `<b>${upScale}× → ${p.w}×${p.h}</b>${p.limited ? ` (screen limit${p.scale < upScale ? `, ${p.scale}× pass` : ""})` : ""}`;
+  if ($("upOff")) $("upOff").onclick = e => { e.preventDefault(); $("upScreen").checked = true; $("upScreen").click(); };
   if (!upDim) { $("upInfo").textContent = ""; return; }
   $("upInfo").textContent = `Picture ${upDim[0]}×${upDim[1]}`;
+  if (p && p.limited) { upChk = null; $("upEst").innerHTML = ""; return; }
   try { upChk = await api("upscale/check", { width: upDim[0], height: upDim[1], scale: upScale }); } catch (e) { upChk = null; return; }
   const c = upChk;
   $("upEst").className = "small " + (c.ok ? "muted" : "warn");
@@ -331,15 +383,19 @@ async function upEstimate() {
 }
 $("upGo").onclick = async () => {
   if (!upSrc) return alert("Pick a photo first.");
-  const sc = upScale; let max = Math.max(...upDim);
+  const p = upPlan();
+  if (p && p.already) return alert("This picture is already at or above your screen size. Turn off 'Limit to my screen' to upscale it anyway.");
+  const sc = p && p.limited ? p.scale : upScale; let max = Math.max(...upDim);
   if (upChk && !upChk.ok) {
     if (!confirm(`${upChk.reason}.\n\nShrink the picture to ${upChk.fit_width}×${upChk.fit_height} first? (result ${upChk.fit_width * sc}×${upChk.fit_height * sc})`)) return;
     max = Math.max(upChk.fit_width, upChk.fit_height);
   }
-  const im = await shrink(upSrc, max, "image/png");
-  $("upGo").disabled = true;
-  const r = await runJob({ type: "upscale", image: im.b64, scale: sc, model: $("upModel").value, device: $("upDev").value, format: $("upFmt").value }, $("upJob"), `Upscale ${sc}×`);
-  $("upGo").disabled = false;
+  $("upOut").innerHTML = "";
+  const r = await runJob(async () => { const im = await shrink(upSrc, max, "image/png");
+      const b = { type: "upscale", image: im.b64, scale: sc, model: $("upModel").value, device: $("upDev").value, format: $("upFmt").value };
+      if (p && p.limited) { b.max_w = p.w; b.max_h = p.h; }
+      return b; },
+    $("upJob"), `Upscale ${sc}×` + (p && p.limited ? ` → ${p.w}×${p.h} (screen)` : ""), { btn: $("upGo"), done: (r, s) => `Done in ${s} s on ${r.device || "?"} → ${r.width}×${r.height} ${r.format || ""}${r.image ? " (" + fmtMB(r.image.length * 0.75) + ")" : ""}` });
   if (r) {
     const ext = r.format === "JPEG" ? "jpg" : "png";
     showResult($("upOut"), r, "npustudio-upscale", `· ${r.width}×${r.height} ${r.format || ""}`);

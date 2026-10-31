@@ -94,13 +94,14 @@
   <button id="upPick" class="wide">📷 Pick a photo</button>
   <img id="upIn" class="preview hidden" alt=""><p id="upInfo" class="muted small"></p>
   <label>Scale</label>
+  <label class="chk"><input type="checkbox" id="upScreen"> Limit to my screen <span id="upScreenSz" class="muted small"></span></label>
   <div class="seg" id="upScale"><button data-v="2">2×</button><button data-v="4" class="on">4×</button><button data-v="8">8×</button><button data-v="16">16×</button></div>
   <div class="row">
     <label class="grow">Model<select id="upModel"><option value="sharp">Sharp (Real-ESRGAN x4plus)</option><option value="fast">Fast (Intel SR-1032)</option></select></label>
     <label class="grow">Desktop chip<select id="upDev"><option>Auto</option><option>NVIDIA</option><option value="Intel Arc">Intel UHD 770</option><option>CPU</option><option>All</option></select></label>
   </div>
   <label>Result format<select id="upFmt"><option value="AUTO">Auto (PNG, JPEG when huge)</option><option>PNG</option><option>JPEG</option></select></label>
-  <p id="upEst" class="small"></p>
+  <p id="upPlan" class="small"></p><p id="upEst" class="small"></p>
   <button id="upGo" class="primary wide">Upscale</button>
   <div id="upJob"></div><div id="upOut" class="out"></div>
 </section>

@@ -42,3 +42,5 @@ label.chk{display:flex;align-items:center;gap:6px;white-space:nowrap}label.chk i
 input[type=range]{padding:0;height:28px}
 .seg{display:flex;gap:6px;margin:4px 0 8px}.seg button{flex:1;font-weight:600}.seg button.on{background:linear-gradient(135deg,var(--acc),#5a7cff);border:0;color:#fff}
 .warn{color:#ffb74d}#conn{border:0;cursor:pointer}
+.msg.st{color:var(--fg,#ddd);margin-top:4px}.msg.ok{color:#5fd38a;font-weight:600}.job .el{margin-right:8px}
+.msg.thinking{opacity:.75;font-style:italic;animation:pulse 1.2s infinite}@keyframes pulse{50%{opacity:.35}}

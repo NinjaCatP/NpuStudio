@@ -243,6 +243,10 @@ def api_job(kind, a, j):
         if dev not in UP_DEVICES: raise ValueError("device must be one of " + ", ".join(UP_DEVICES))
         u = upscaler(name, dev); stat(f"Upscaling {sc}x on {u.device}" + (" (2 passes)" if sc >= 8 else "") + "...")
         im = u.upscale_to(src, sc, prog); del src
+        mw, mh = int(a.get("max_w") or 0), int(a.get("max_h") or 0)
+        if mw > 0 and mh > 0 and (im.size[0] > mw or im.size[1] > mh):     # phone "Limit to my screen": send a smaller result
+            from PIL import Image; f = min(mw / im.size[0], mh / im.size[1]); stat("fitting to your screen...")
+            im = im.resize((max(1, round(im.size[0] * f)), max(1, round(im.size[1] * f))), Image.LANCZOS)
         fmt = a.get("format", "AUTO").upper()
         if fmt == "AUTO": fmt = "PNG" if im.size[0] * im.size[1] <= 24e6 else "JPEG"     # big PNGs are huge to send
         stat("encoding result..."); return {"image": imgb64(im, fmt), "format": fmt, "width": im.size[0], "height": im.size[1], "device": u.device}
