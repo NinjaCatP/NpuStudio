@@ -37,6 +37,7 @@ def build_analyze_tab(root, nb, edit_box, gen_prompt, gtab, dnd=None):
     pv = tk.Label(body, text="Open or drop a picture here", bg="#2b2b2b", fg="#bbb", width=48); pv.pack(side="left", fill="both", expand=False)
     rt = ttk.Frame(body); rt.pack(side="left", fill="both", expand=True, padx=6)
     sizev = tk.StringVar(value="Size: -"); ttk.Label(rt, textvariable=sizev).pack(anchor="w")
+    posev = tk.StringVar(value="Pose: -"); ttk.Label(rt, textvariable=posev, wraplength=420).pack(anchor="w")
     ttk.Label(rt, text="Description").pack(anchor="w"); dt = tk.Text(rt, height=6, wrap="word"); dt.pack(fill="both", expand=True)
     ttk.Label(rt, text="Gen prompt").pack(anchor="w"); pt = tk.Text(rt, height=5, wrap="word"); pt.pack(fill="both", expand=True)
     br = ttk.Frame(rt); br.pack(fill="x", pady=4)
@@ -72,7 +73,7 @@ def build_analyze_tab(root, nb, edit_box, gen_prompt, gtab, dnd=None):
                 r = imganalyze.analyze(ch, st["img"], devv.get(), lambda m: ui(status.set, f"{m} ({time.time() - st['t0']:.0f} s)"))
                 sp = imganalyze.save_txt(r) if txtv.get() else None
                 def done():
-                    dt.delete("1.0", "end"); dt.insert("1.0", r["description"]); pt.delete("1.0", "end"); pt.insert("1.0", r["prompt"])
+                    dt.delete("1.0", "end"); dt.insert("1.0", r["description"]); pt.delete("1.0", "end"); pt.insert("1.0", r["prompt"]); posev.set("Pose: " + r.get("pose", "-"))
                     status.set(f"Analyzed in {r['seconds']} s on {r['device']}" + (f" - saved {sp}" if sp else "")); gob.configure(text="Re-analyze")
                 ui(done)
             except Exception as e: logging.exception("analyze tab"); ui(status.set, f"Error: {e}")

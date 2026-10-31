@@ -254,3 +254,5 @@ Face and eye detailer (v1.6.2)
   Copy description / Copy prompt / Use in Gen / Re-analyze; chip picker; optional .txt to output\analyze\<date>.
 - Start with Windows (Server menu): per-user Run entry, opens NpuStudio with pythonw; "Also start the server at Windows
   sign-in" (waits 8 s for the network, never starts a second server). Turn off: Server menu > untick Start with Windows.
+- 1.6.8 Analyze: pose check. OpenPose skeleton -> plain pose phrases (arms at sides, hand on hip, arms raised, arms crossed, hand near face, one arm extended, standing/sitting/kneeling/legs crossed). Corrects the captioner's pose words in the description and Gen prompt; shows "Pose: ... (confidence)" on PC and phone; low confidence keeps the captioner text and marks "pose uncertain".
+- Image Gen (PC): fixed "cannot access local variable 'w'" error.

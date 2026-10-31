@@ -1,7 +1,7 @@
 // NpuStudio Companion web UI. Served by the desktop at /app; the Android shell (window.NpuShell) is optional.
 "use strict";
 const $ = id => document.getElementById(id);
-const UI_VERSION = "1.6.7";
+const UI_VERSION = "1.6.8";
 const Shell = window.NpuShell || null;
 const shellVersion = Shell && Shell.shellVersion ? Number(Shell.shellVersion()) : 0;
 
@@ -289,7 +289,7 @@ function addSend(box, b64, meta) {
 }
 // ---------- Analyze tab: description + Gen-ready prompt ----------
 let anaSrc = null, anaDim = null;
-async function anaLoad(d) { anaSrc = d; $("anaIn").src = d; $("anaIn").classList.remove("hidden"); const i = await loadImg(d); anaDim = [i.naturalWidth, i.naturalHeight]; $("anaSize").textContent = `Size: ${anaDim[0]}×${anaDim[1]}`; $("anaDesc").value = ""; $("anaPrompt").value = ""; }
+async function anaLoad(d) { anaSrc = d; $("anaIn").src = d; $("anaIn").classList.remove("hidden"); const i = await loadImg(d); anaDim = [i.naturalWidth, i.naturalHeight]; $("anaSize").textContent = `Size: ${anaDim[0]}×${anaDim[1]}`; $("anaDesc").value = ""; $("anaPrompt").value = ""; $("anaPose").textContent = ""; }
 $("anaPick").onclick = async () => { const d = await pickImage(); if (d) { await anaLoad(d); $("anaGo").click(); } };
 $("anaGo").onclick = async () => {
   if (!anaSrc) return notice("Pick a picture first.");
@@ -297,7 +297,7 @@ $("anaGo").onclick = async () => {
   const r = await runJob({ type: "analyze", image: s.split(",")[1], device: $("anaDev").value, width: anaDim[0], height: anaDim[1], save_txt: $("anaTxt").checked }, $("anaJob"), "Analyze",
     { btn: $("anaGo"), done: (r, s) => `Analyzed in ${s} s${r.device ? " on " + r.device : ""}${r.saved_path ? " · saved .txt" : ""}` });
   if (!r) return;
-  $("anaDesc").value = r.description || ""; $("anaPrompt").value = r.prompt || ""; $("anaSize").textContent = `Size: ${r.width}×${r.height}`; $("anaGo").textContent = "🔄 Re-analyze";
+  $("anaDesc").value = r.description || ""; $("anaPrompt").value = r.prompt || ""; $("anaSize").textContent = `Size: ${r.width}×${r.height}`; $("anaPose").textContent = "Pose: " + (r.pose || "-"); $("anaGo").textContent = "🔄 Re-analyze";
 };
 const copyTxt = async (t, what) => { try { await navigator.clipboard.writeText(t); notice(what + " copied."); } catch { const x = document.createElement("textarea"); x.value = t; document.body.appendChild(x); x.select(); document.execCommand("copy"); x.remove(); notice(what + " copied."); } };
 $("anaCopyD").onclick = () => $("anaDesc").value && copyTxt($("anaDesc").value, "Description");
