@@ -27,7 +27,12 @@ def save(im, kind, tag=""):
         while os.path.exists(p): p = os.path.join(d, f"{base}_{n}.{ext}"); n += 1
         open(p, "wb").close()
     if big: im.convert("RGB").save(p, "JPEG", quality=95)
-    else: im.save(p, "PNG", compress_level=3)
+    else:
+        kw = {}
+        if im.info.get("npustudio_gen"):
+            from PIL.PngImagePlugin import PngInfo
+            pi = PngInfo(); pi.add_text("npustudio_gen", str(im.info["npustudio_gen"])); kw["pnginfo"] = pi
+        im.save(p, "PNG", compress_level=3, **kw)
     return p
 
 def autosave(im, kind, tag=""):

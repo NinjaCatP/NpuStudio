@@ -173,7 +173,7 @@ class Changer:
             except Exception as e: err.append(f"{c}: {str(e)[:200]}"); logging.warning("img2img %s: %s", c, e)
         raise RuntimeError("img2img: no device worked: " + " | ".join(err))
 
-    def edit_whole(self, im, instr, analysis="", strength=0.4, seed=1, progress=None, status=None, upscaler=None):
+    def edit_whole(self, im, instr, analysis="", strength=0.4, seed=1, progress=None, status=None, upscaler=None, gen=None):
         analysis = atext(analysis)
         """Whole-image change. NVIDIA: InstructPix2Pix (takes the instruction directly, keeps faces).
         Otherwise LCM img2img with a rewritten scene prompt. Returns (img, devices, how, prompt_used)."""
@@ -210,7 +210,7 @@ class Changer:
         return out, devs, "LCM img2img + " + how, p
 
     ATTR = r"\b(outfit|clothes|clothing|shirt|top|dress|jacket|coat|suit|pants|skirt|shoes|hair|skin|eyes|eye|lips|eyebrows|beard|face|arms|legs|hands|color|colour|hat)\b"
-    def edit_masked(self, ai, im, mask, instr, analysis="", strength=1.0, progress=None, status=None, upscaler=None, method="Auto"):
+    def edit_masked(self, ai, im, mask, instr, analysis="", strength=1.0, progress=None, status=None, upscaler=None, method="Auto", gen=None):
         analysis = atext(analysis)
         """Masked change, routed by intent (method Auto/Redraw/Recolor):
           recolor = colour/material change of the same thing -> InstructPix2Pix kept inside the mask (NVIDIA)
@@ -234,6 +234,7 @@ class Changer:
             return r, ("NVIDIA",), how, f"(detailer: {_fw})"
         import devices
         tgt, rep, kind = parse(instr)
+        loose = gen_loose(gen, instr); _TL.relax = loose
         mask = protect_face(im, mask, instr)
         if kind == "remove":
             r, d = ai.erase(im, mask, status); return r, d, "Method: erase (LaMa)", "(erase)"
@@ -269,6 +270,9 @@ class Changer:
                 hs = bg_mask(ai, im, hard)
                 if hs: hard, soft = hs
         if not hard.getbbox(): hard, soft = mask.convert("L"), mask.convert("L")
+        if loose and tgt != "arms":   # From Gen: a bigger area for outfits/background/hair/accessories
+            hard = grow(hard, max(6, int(min(im.size) * 0.015))).point(lambda v: 255 if v > 100 else 0)
+            soft = hard.filter(__import__("PIL.ImageFilter").ImageFilter.GaussianBlur(3))
         hard = protect_face(im, hard, instr); soft = Image.fromarray(np.minimum(np.asarray(soft.convert("L")), np.asarray(hard.filter(__import__("PIL.ImageFilter").ImageFilter.MaxFilter(5)))))
         ctl = control_mode(tgt, rep)
         hair_short = bool(re.fullmatch(r"(?i)\s*hair\s*", tgt or "")) and bool(re.search(r"\b(short|bob|pixie|buzz|bald)\b", rep or "", re.I))
@@ -282,6 +286,12 @@ class Changer:
             # general engine: ControlNet (anime lineart) inpaint inside the target mask. "keep" = outline held, interior
             # lines removed (same-shape swaps); "loose" = only the surroundings guide it, so the shape may change inside the mask
             cp, cneg = change_prompt(analysis, tgt, rep, col, garment)
+            _sb = 11
+            if loose:
+                gp = gen_prompt_for(gen, tgt, garment)
+                if gp: cp = cp + ", " + gp
+                try: _sb = int(gen.get("seed", 11)) % (2 ** 31 - 64)
+                except Exception: _sb = 11
             bright = bool(re.search(r"\b(bright|vivid|neon|light)\b", rep or "", re.I))
             qkind = "garment" if garment else ("background" if re.search(r"\b(background|sky|wall|scene)\b", tgt or "", re.I) else "")
             rejects = []; pre = {}; sty = style_of_rep(rep) if garment else None
@@ -296,11 +306,11 @@ class Changer:
                         if remote.both():
                             if status: status(f"Drawing '{rep}' - versions {i + 1}-{i + N} on both machines in parallel...")
                             _cp, _i0 = cp, i
-                            rs = remote.run_split(lambda k: cn_redraw(im, hard, soft, _cp, cneg, seed=11 + (_i0 + k) * 7, progress=progress if remote.is_local() else None, mode=ctl), N)
+                            rs = remote.run_split(lambda k: cn_redraw(im, hard, soft, _cp, cneg, seed=_sb + (_i0 + k) * 7, progress=progress if remote.is_local() else None, mode=ctl), N)
                             pre = {i + k: x for k, x in enumerate(rs) if x is not None}
                     except Exception: logging.exception("both machines split")
                 if status and i not in pre: status(f"Drawing '{rep}' - version {i + 1} (ControlNet {ctl}, NVIDIA)...")
-                try: r = pre.pop(i) if i in pre else cn_redraw(im, hard, soft, cp, cneg, seed=11 + i * 7, progress=progress, status=status, mode=ctl)
+                try: r = pre.pop(i) if i in pre else cn_redraw(im, hard, soft, cp, cneg, seed=_sb + i * 7, progress=progress, status=status, mode=ctl)
                 except Exception: logging.exception("controlnet redraw"); break
                 cs_ = color_score(r, hard, col, bright) if col else (style_score(r, hard, sty) if sty else 1.0); ch = changed_score(im, r, hard)
                 sc = cs_ * (1.0 if ch > 0.35 else 0.4)
@@ -336,7 +346,7 @@ class Changer:
                 if _bad: rejects.append(_why); sc = -0.5
                 if best is None or sc > best[0]: best = (sc, r, d, cs_, ch)
         sc, r, d, cs_, ch = best
-        how = f"Method: redraw ({'ControlNet ' + ctl if cn_ok else 'inpaint'}, best of {N}, changed {ch:.2f}" + (f", colour {cs_:.2f})" if col else ")")
+        how = f"Method: redraw ({'ControlNet ' + ctl if cn_ok else 'inpaint'}, best of {N}, changed {ch:.2f}" + (f", colour {cs_:.2f})" if col else ")") + (" [From Gen: looser]" if loose else "")
         if hair_short and sc >= 0.6: how += f" (short-hair check {sc:.2f})"
         elif hair_short: how += f" - short-hair check failed ({sc:.2f})"; sc = 1.0
         if sc <= -1: how = "Method: redraw - every version put a hand on the body, so nothing was kept; try again"; r = im.convert("RGB")
@@ -658,6 +668,26 @@ def feather(hard, r=2.5):
     from PIL import ImageFilter
     return hard.filter(ImageFilter.MaxFilter(3)).filter(ImageFilter.GaussianBlur(r))
 
+import threading as _th
+_TL = _th.local()
+BODYISH = r"(?i)\b(body|skin|arms?|legs?|hands?|feet|foot|fingers?|face|faces|eyes?|nose|mouth|lips|chest|breasts?|boobs?|hips?|waist|butt|thighs?|belly|stomach|neck|shoulders?|torso|figure|age|younger|older|identity)\b"
+def gen_loose(gen, instr):
+    """Image came from NpuStudio's own Image Gen and the edit is NOT about the body/face -> a looser AI Change.
+    Every safety rule (reshape/clothing-removal refusal, face protection, silhouette keep) still applies."""
+    if not gen or not isinstance(gen, dict): return False
+    import facefix
+    if facefix.reshape_block(instr) or facefix.body_fix(instr) or facefix.fix_what(instr): return False
+    return not re.search(BODYISH, instr or "")
+GARMENT_WORDS = r"(?i)\b(cloth\w*|outfit|dress|shirt|top|skirt|pants|jeans|shorts|blouse|jacket|coat|uniform|kimono|suit|sweater|hoodie|robe|gown|armor|armour|bikini|lingerie|underwear|swimsuit|nude|naked|topless)\b"
+def gen_prompt_for(gen, tgt, garment):
+    """Reuse the original Gen prompt for consistency, minus the part being changed (and never anything unsafe)."""
+    p = str((gen or {}).get("prompt", ""))
+    import facefix
+    if not p or facefix.reshape_block(p): return ""
+    p = facefix.strip_size_words(p); drop = GARMENT_WORDS if garment else (r"(?i)\b" + re.escape(tgt) + r"\b" if tgt else None)
+    ch = [c.strip() for c in p.split(",") if c.strip() and not (drop and re.search(drop, c)) and not re.search(r"(?i)\b(see[- ]?through|transparent|sheer|nsfw)\b", c)]
+    return ", ".join(ch)[:300]
+
 def washed_out(orig, new, hard):
     """Translucent / smeared / ghosted result inside the mask: detail (edge energy) and contrast collapse vs the original
     and vs the area around it. -> (bad, reason)."""
@@ -673,6 +703,10 @@ def washed_out(orig, new, hard):
     det = en[m].mean() / max(1.0, eo[m].mean()); con = an[m].std() / max(1.0, ao[m].std())
     sur = en[ring].mean() if ring.any() else eo[m].mean(); rel = en[m].mean() / max(1.0, sur)
     sat = sn[m].mean() / max(1.0, so[m].mean())
+    if getattr(_TL, "relax", False):   # From-Gen images: slightly looser gate
+        if det < 0.28 and con < 0.5: return True, f"smeared/washed-out area (detail {det:.2f}, contrast {con:.2f})"
+        if rel < 0.2 and sat < 0.42: return True, f"translucent grey wash (detail vs surroundings {rel:.2f}, colour {sat:.2f})"
+        return False, ""
     if det < 0.35 and con < 0.6: return True, f"smeared/washed-out area (detail {det:.2f}, contrast {con:.2f})"
     if rel < 0.25 and sat < 0.5: return True, f"translucent grey wash (detail vs surroundings {rel:.2f}, colour {sat:.2f})"
     return False, ""

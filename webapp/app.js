@@ -1,7 +1,7 @@
 // NpuStudio Companion web UI. Served by the desktop at /app; the Android shell (window.NpuShell) is optional.
 "use strict";
 const $ = id => document.getElementById(id);
-const UI_VERSION = "1.6.5";
+const UI_VERSION = "1.6.6";
 const Shell = window.NpuShell || null;
 const shellVersion = Shell && Shell.shellVersion ? Number(Shell.shellVersion()) : 0;
 
@@ -278,19 +278,21 @@ $("genGo").onclick = async () => {
   if (!(w >= 64 && h >= 64 && w <= 16384 && h <= 16384)) return notice("Size must be between 64 and 16384 on each side.");
   const r = await runJob({ type: "gen", prompt: p, width: w, height: h, steps: +$("genSteps").value || 4, seed: +$("genSeed").value || 0, upscaler: $("genUp").value, autofix: $("genFix").checked }, $("genJob"), "Image Gen",
     { btn: $("genGo"), done: (r, s) => `Done in ${s} s · ${w}×${h}` });
-  if (r) { showResult($("genOut"), r, "npustudio-gen", `· ${w}×${h}`); addSend($("genOut"), r.image); }
+  if (r) { showResult($("genOut"), r, "npustudio-gen", `· ${w}×${h}`); addSend($("genOut"), r.image, r.gen_meta); }
 };
-function addSend(box, b64) {
+function addSend(box, b64, meta) {
   const row = document.createElement("div"); row.className = "row";
   row.innerHTML = `<button class="grow">✏️ Send to Edit</button><button class="grow">🔍 Send to Upscale</button>`;
-  row.children[0].onclick = () => { editLoad("data:image/png;base64," + b64, true); tabTo("edit"); };
+  row.children[0].onclick = async () => { await editLoad("data:image/png;base64," + b64, true); setGen(meta || null); tabTo("edit"); };
   row.children[1].onclick = () => { upLoad("data:image/png;base64," + b64); tabTo("up"); };
   box.appendChild(row);
 }
 function tabTo(t) { const b = document.querySelector(`#tabs button[data-t="${t}"]`); if (b) b.click(); }
 
 // ---------- edit (laptop Edit tab: transform, crop, resize, adjust, brush mask, AI erase / remove bg / AI Change) ----------
-const ED = { cur: null, undo: [], redo: [], w: 0, h: 0 };
+const ED = { cur: null, undo: [], redo: [], w: 0, h: 0, gen: null };
+// "From Gen": pictures sent here from Image Gen get a looser AI Change for non-body edits (safety rules unchanged)
+function setGen(m) { ED.gen = m; $("genBadge").classList.toggle("hidden", !m); $("editRegen").classList.toggle("hidden", !m); }
 const EDIT_MAX = 2048;   // working size sent to the desktop
 async function editLoad(src, fromResult) {
   const s = await shrinkUrl(src, EDIT_MAX);
@@ -313,7 +315,7 @@ window.addEventListener("resize", fitMask);
 function pushEdit(url) { ED.undo.push(ED.cur); ED.redo = []; clearMask(); setEdit(url); }
 $("editUndo").onclick = () => { if (!ED.undo.length) return; ED.redo.push(ED.cur); setEdit(ED.undo.pop()); };
 $("editRedo").onclick = () => { if (!ED.redo.length) return; ED.undo.push(ED.cur); setEdit(ED.redo.pop()); };
-$("editPick").onclick = async () => { const d = await pickImage(); if (!d) return; ED.undo = []; ED.redo = []; ED.cur = null; clearMask(); await editLoad(d); $("editOut").innerHTML = ""; };
+$("editPick").onclick = async () => { const d = await pickImage(); if (!d) return; ED.undo = []; ED.redo = []; ED.cur = null; setGen(null); clearMask(); await editLoad(d); $("editOut").innerHTML = ""; };
 async function canvasOp(fn) {      // draws the current image through fn(ctx, img) on a new canvas
   const im = await loadImg(ED.cur); const c = document.createElement("canvas"); fn(c, c.getContext("2d"), im);
   pushEdit(c.toDataURL("image/png"));
@@ -415,7 +417,12 @@ $("editGo").onclick = () => {
   const instr = $("editInstr").value.trim(); if (!instr) return $("editInstr").focus();
   const m = $("editWhole").checked ? null : maskB64();
   editJob({ type: "change", image: curB64(), instruction: instr, method: $("editMethod").value, strength: +$("editStr").value,
-            grow: +$("editGrow").value, whole: $("editWhole").checked, ...(m ? { mask: m } : {}) }, "AI Change");
+            grow: +$("editGrow").value, whole: $("editWhole").checked, ...(m ? { mask: m } : {}), ...(ED.gen ? { gen_meta: ED.gen } : {}) }, "AI Change");
+};
+$("editRegen").onclick = async () => {
+  const instr = $("editInstr").value.trim(); if (!ED.gen) return; if (!instr) return notice("Type the change first (e.g. 'a red sweater dress', 'beach background', 'watercolor style').");
+  const r = await runJob({ type: "regen", instruction: instr, gen_meta: ED.gen, upscaler: "sharp" }, $("editJob"), "Regenerate", { done: (r, s) => `Regenerated in ${s} s` });
+  if (r) { await editLoad("data:image/png;base64," + r.image, true); setGen(r.gen_meta || ED.gen); $("editOut").innerHTML = `<p class="muted small">Regenerated from the original Gen prompt + your change (Undo goes back).</p>`; }
 };
 $("editSave").onclick = () => ED.cur && saveImg(curB64(), `npustudio-edit-${Date.now()}.png`);
 $("editShare").onclick = () => ED.cur && shareImg(curB64(), `npustudio-edit-${Date.now()}.png`);

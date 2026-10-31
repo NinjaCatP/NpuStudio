@@ -241,6 +241,7 @@ def build_gen_tab(root, nb, send_to_upscale=None, get_upscaler=None, up_models=N
                             if ok: im = im2
                             fxn = "; " + ("faces fixed" if ok else "face fix: " + fxn.replace("NOT DONE - ", "")[:80])
                     except Exception: logging.exception("gen auto face fix"); fxn = "; face fix failed"
+                import json as _js; im.info["npustudio_gen"] = _js.dumps({"prompt": prompt, "negative": neg, "seed": seed, "steps": steps, "width": tw, "height": th, "model": "imagegen"})
                 import outputs; outputs.autosave(im, "gen", prompt)
                 dt = time.time() - t; t_up = dt - t_draw
                 w, h = tw, th

@@ -4,7 +4,7 @@ and every request needs the pairing key from models/remote_server.json. Start wi
 import sys as _s, os as _o
 for _n in ("stdout", "stderr"):
     if getattr(_s, _n) is None: setattr(_s, _n, open(_o.devnull, "w", encoding="utf-8"))
-import os, urllib.request, sys, json, time, uuid, secrets, socket, logging, threading, ipaddress, traceback, inspect
+import os, re, urllib.request, sys, json, time, uuid, secrets, socket, logging, threading, ipaddress, traceback, inspect
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 os.environ["NPU_SERVER"] = "1"
 APP = os.path.dirname(os.path.abspath(__file__)); MD = os.path.join(APP, "models"); sys.path.insert(0, APP)
@@ -263,7 +263,19 @@ def api_job(kind, a, j):
                 import facefix; stat("auto-fixing faces/eyes..."); im2, fx, ok = facefix.fix(im, "eyes", a.get("prompt", ""), progress=prog, status=stat, min_gain=0.0)
                 if ok: im = im2
             except Exception: logging.exception("gen auto face fix"); fx = "face fix failed"
-        return {"image": imgb64(im), "device": "NVIDIA", "facefix": fx, **save_out(im, "gen", stat, a.get("prompt", ""))}
+        meta = {"prompt": a.get("prompt", ""), "seed": int(a.get("seed", 42)), "steps": int(a.get("steps", 4)), "width": tw, "height": th, "model": "imagegen"}
+        im.info["npustudio_gen"] = json.dumps(meta)
+        return {"image": imgb64(im), "device": "NVIDIA", "facefix": fx, "gen_meta": meta, **save_out(im, "gen", stat, a.get("prompt", ""))}
+    if kind == "regen":      # "Regenerate with tweaks": rerun Image Gen with the original prompt/seed + a NON-body change
+        import facefix, aichange
+        g = a.get("gen_meta") or {}; tw_ = str(a.get("instruction", "")).strip()
+        if not g.get("prompt"): raise ValueError("This picture didn't come from Image Gen, so it can't be regenerated.")
+        if facefix.reshape_block(tw_) or facefix.reshape_block(g["prompt"]): raise ValueError(facefix.reshape_block(tw_) or "This prompt can't be regenerated.")
+        if not aichange.gen_loose(g, tw_): raise ValueError("Regenerate with tweaks is for outfits, background, hair, accessories or art style - not body or face changes. Nothing was changed.")
+        tw2 = re.sub(r"(?i)^(please\s+)?(change|make|turn|give|add|put|switch|swap|replace)\s+(it|her|him|them|the\s+\w+)?\s*(to|into|with)?\s*", "", tw_)
+        base = aichange.gen_prompt_for(g, None, bool(re.search(aichange.GARMENT_WORDS, tw_)))
+        return api_job("gen", {**a, "prompt": (tw2 + ", " + base).strip(", "), "seed": g.get("seed", 42), "steps": g.get("steps", 4),
+                               "width": g.get("width", 768), "height": g.get("height", 768), "upscaler": a.get("upscaler", "sharp"), "autofix": True}, j)
     if kind == "upscale":
         name = "Sharp (Real-ESRGAN x4plus)" if a.get("model", "sharp") == "sharp" else "Fast (Intel SR-1032)"
         src = b64img(a["image"]).convert("RGB"); sc = int(a.get("scale", 4))
@@ -314,7 +326,8 @@ def api_job(kind, a, j):
                 tgt = aichange.parse(instr)
                 mask = facefix.find_mask(im, tgt[0], instr, ana)[0] if (tgt[0] and not facefix.fix_what(instr)) else None
             except Exception: logging.exception("api auto-mask"); mask = None
-        grow = max(-30, min(40, int(a.get("grow", 8))))
+        _gen = a.get("gen_meta") if isinstance(a.get("gen_meta"), dict) else None; _loose = aichange.gen_loose(_gen, instr)
+        grow = max(-30, min(80 if _loose else 40, int(a.get("grow", 8))))
         if mask is not None and grow:
             from PIL import ImageFilter
             k = abs(grow) * 2 + 1; mask = mask.filter(ImageFilter.MaxFilter(k) if grow > 0 else ImageFilter.MinFilter(k))
@@ -322,13 +335,13 @@ def api_job(kind, a, j):
         if method not in ("Auto", "Redraw", "Recolor"): raise ValueError("method must be Auto, Redraw or Recolor")
         if mask is not None and mask.getbbox():
             st_ = float(a.get("strength", 1.0)); stat("changing the masked area...")
-            r = c.edit_masked(ai(), im, mask, instr, ana, strength=max(0.5, min(1.0, st_)), progress=prog, status=stat, method=method)
+            r = c.edit_masked(ai(), im, mask, instr, ana, strength=max(0.5, min(1.0, st_)), progress=prog, status=stat, method=method, gen=_gen)
         else:
             import facefix
             if not facefix.fix_what(instr) and not facefix.body_fix(instr) and not aichange.is_global(instr) and not a.get("whole"):
                 raise ValueError("Couldn't find what to change. Name the thing (e.g. 'change outfit to a red dress'), paint it with the brush, "
                                  "or tick 'Whole picture' for a whole-picture change. Nothing was changed.")
-            st_ = float(a.get("strength", 0.4)); r = c.edit_whole(im, instr, ana, strength=max(0.2, min(0.6, st_)), progress=prog, status=stat)
+            st_ = float(a.get("strength", 0.4)); r = c.edit_whole(im, instr, ana, strength=max(0.2, min(1.0 if _loose else 0.6, st_)), progress=prog, status=stat, gen=_gen)
         cbox = None
         try:   # where the picture changed, so the phone can show a zoomed before/after (eye fixes are tiny at phone size)
             from PIL import ImageChops

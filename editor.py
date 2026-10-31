@@ -191,7 +191,9 @@ def build_edit_tab(root, nb, send_to_upscale=None, dnd=None, upscale=None):
     cv = tk.Canvas(body, bg="#2b2b2b", highlightthickness=0); cv.pack(fill="both", expand=True)
     pb = ttk.Progressbar(f, maximum=100); pb.pack(fill="x", padx=6)
     status = tk.StringVar(value="Open an image, drag one in, or use 'Send to Edit' from another tab.")
-    ttk.Label(f, textvariable=status).pack(anchor="w", padx=6, pady=3)
+    srow = ttk.Frame(f); srow.pack(fill="x")
+    genbadge = tk.Label(srow, text=" 🎨 From Gen ", bg="#6b4fd8", fg="white")
+    ttk.Label(srow, textvariable=status).pack(side="left", anchor="w", padx=6, pady=3)
     def B(p, t, cmd, **kw): kw.setdefault("width", max(4, len(t) + 1)); b = ttk.Button(p, text=t, command=cmd, **kw); b.pack(side="left", padx=2); return b
     # adjustments vars
     bv, cvv, sv, shv = (tk.DoubleVar(value=1.0) for _ in range(4)); fv = tk.StringVar(value="None")
@@ -219,6 +221,13 @@ def build_edit_tab(root, nb, send_to_upscale=None, dnd=None, upscale=None):
         try:
             im = src if isinstance(src, Image.Image) else Image.open(src)
             im = im.convert("RGBA") if im.mode in ("RGBA", "LA", "P") and "A" in im.convert("RGBA").getbands() and im.mode != "RGB" else im.convert("RGB")
+            g = None
+            try:
+                import json as _js; g = _js.loads((src.info if isinstance(src, Image.Image) else Image.open(src).info).get("npustudio_gen") or "null")
+            except Exception: g = None
+            st["gen"] = g if isinstance(g, dict) else None
+            if st["gen"]: im.info["npustudio_gen"] = _js.dumps(st["gen"]); genbadge.pack(side="right", padx=6)
+            else: genbadge.pack_forget()
             st["hist"].clear(); st["redo"].clear(); st["img"] = None; push(im, "Loaded" if isinstance(src, Image.Image) else f"Loaded {os.path.basename(src)}")
         except Exception as e: logging.exception("edit load"); messagebox.showerror("NpuStudio", str(e))
     def openf():
@@ -517,9 +526,10 @@ def build_edit_tab(root, nb, send_to_upscale=None, dnd=None, upscale=None):
                 try:
                     c = changer()
                     if mask is not None:
-                        res, dev, how, p = c.edit_masked(ai, im, mask, instr, analysis, strength=max(0.5, strength), progress=prog, status=wset, upscaler=upscale, method=methv.get())
+                        res, dev, how, p = c.edit_masked(ai, im, mask, instr, analysis, strength=max(0.5, strength), progress=prog, status=wset, upscaler=upscale, method=methv.get(), gen=st.get("gen"))
                     else:
-                        res, dev, how, p = c.edit_whole(im, instr, analysis, strength=min(strength, 0.6), progress=prog, status=wset, upscaler=upscale)
+                        res, dev, how, p = c.edit_whole(im, instr, analysis, strength=min(strength, 1.0 if aichange.gen_loose(st.get("gen"), instr) else 0.6), progress=prog, status=wset, upscaler=upscale, gen=st.get("gen"))
+                    if st.get("gen") and res is not im: res.info["npustudio_gen"] = __import__("json").dumps(st["gen"])   # stays "From Gen"
                     import outputs
                     if res is not im: outputs.autosave(res, "edit" if _fix else "aichange", instr)   # detailer fixes go to output\edit\<date>
                     dt = time.time() - t; dv = dev if isinstance(dev, str) else "/".join(dict.fromkeys(dev))

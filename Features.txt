@@ -240,3 +240,10 @@ Face and eye detailer (v1.6.2)
 - Clothing redraws: opaque fabric / fully clothed prompt, see-through/sheer/smeared negatives; results with a translucent or smeared wash are rejected (original kept).
 - Clothing/limb/object masks never touch the face (detected face boxes are cut out) unless the request is about the face.
 - Removing clothing or making it see-through is refused.
+
+== 1.6.6 (2026-10-31) ==
+- "From Gen" pictures (sent from Image Gen, or PNGs saved by Image Gen - prompt/seed stored in the PNG): looser AI Change for
+  outfits, background, hair, accessories and art style (strength up to 1.0, bigger area, reuses the Gen prompt and seed,
+  slightly looser smear check). 🎨 From Gen badge in the Edit tab (PC + phone).
+- Phone: 🎲 Regenerate with tweaks (reruns Gen with the original prompt + seed + your non-body change).
+- Unchanged for every picture: no body reshaping, no clothing removal/see-through, face protection, face identity/age rules.
