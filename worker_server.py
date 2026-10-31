@@ -1,6 +1,9 @@
 """NpuStudio desktop worker: lets the laptop send heavy jobs (Image Gen, upscale, AI Change, background removal, erase)
 to this PC over the home network. LAN only: binds to this PC's home-network address, refuses non-private callers,
 and every request needs the pairing key from models/remote_server.json. Start with NpuStudio-Server.bat."""
+import sys as _s, os as _o
+for _n in ("stdout", "stderr"):
+    if getattr(_s, _n) is None: setattr(_s, _n, open(_o.devnull, "w", encoding="utf-8"))
 import os, sys, json, time, uuid, secrets, socket, logging, threading, ipaddress, traceback, inspect
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 os.environ["NPU_SERVER"] = "1"

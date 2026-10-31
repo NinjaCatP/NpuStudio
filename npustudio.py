@@ -1,4 +1,7 @@
 import os, sys, time, threading, logging, traceback, re, queue, json
+# pythonw has no console: sys.stdout/stderr are None and tqdm/print crash ("'NoneType' object has no attribute 'write'")
+for _n in ("stdout", "stderr"):
+    if getattr(sys, _n) is None: setattr(sys, _n, open(os.devnull, "w", encoding="utf-8"))
 import numpy as np
 from PIL import Image, ImageTk, ImageFilter
 APP = os.path.dirname(os.path.abspath(__file__))
@@ -320,9 +323,16 @@ def open_pair_window(root):
     ttk.Button(w, text="Close", command=w.destroy).pack(pady=(0, 12))
 
 class ChatEngine:
-    def __init__(self, status=None):
+    def __init__(self, status=None, lazy=False):
+        self.status = status; self.err = []; self.pipe = None; self.device = None; self.load_time = 0.0; self.stop = False
+        if lazy:     # desktop using the laptop's NPU: no local model until a fallback needs it
+            self.device = "Laptop"; self.target = "pc"; self._rnew = True; return
+        self._load_local()
+
+    def _load_local(self):
+        status = self.status
         import openvino as ov, openvino_genai as og
-        self.og = og; self.err = []; self.pipe = None; self.device = None
+        self.og = og; self.err = []
         avail = ov.Core().available_devices
         for d in ["NPU", "GPU", "CPU"]:
             if d not in avail: continue
@@ -339,6 +349,8 @@ class ChatEngine:
         self.stop = False; self.new_chat()
 
     def new_chat(self):
+        if self.pipe is None:
+            self.target = getattr(self, "want_target", "pc"); self._rnew = True; return
         try: self.pipe.finish_chat()
         except Exception: pass
         import actions
@@ -383,7 +395,7 @@ class ChatEngine:
         """Desktop with Device = Laptop NPU/Arc/RTX: chat runs on the laptop's LLM (its NPU), actions still run here."""
         try:
             import remote, devices
-            return remote.role() == "desktop" and devices.get_raw() in remote.LAPTOP_DEV and remote.online()
+            return chat_peer(devices.get_raw())
         except Exception: return False
 
     def ask(self, text, on_token, max_new=400):
@@ -400,6 +412,9 @@ class ChatEngine:
             except Exception as e:
                 logging.warning("laptop chat failed (%s) - answering here", e)
                 if seen[0]: return 0, time.time() - t
+        if self.pipe is None:
+            if self.status: self.status("Laptop offline - loading the chat model on this PC...")
+            chat_download(); self._load_local()
         self.last_device = self.device
         self.stop = False; n = [0]
         def cb(sub):
@@ -408,6 +423,14 @@ class ChatEngine:
         cfg = self.og.GenerationConfig(); cfg.max_new_tokens = max_new; cfg.do_sample = False; cfg.repetition_penalty = float(os.environ.get("NPU_REP", "1.0")); cfg.stop_strings = {"<|end|>", "<|user|>", "<|endoftext|>"}
         t = time.time(); self.pipe.generate(text, cfg, cb)
         return n[0], time.time() - t
+
+def chat_peer(raw=None):
+    """Desktop: chat runs on the laptop's LLM (its NPU) when Device is Auto or a Laptop chip and the laptop is online."""
+    try:
+        import remote, devices
+        raw = raw or devices.get_raw()
+        return remote.role() == "desktop" and (raw in remote.LAPTOP_DEV or raw in ("Auto", None, "")) and remote.online()
+    except Exception: return False
 
 def chat_test(q):
     c = NpuCounter(); peak = [0.0]; stop = [False]
@@ -533,6 +556,11 @@ def build_chat_tab(root, nb, demo=None):
     ent.bind("<Return>", send)
     def load():
         try:
+            if chat_peer():
+                st["eng"] = ChatEngine(lambda m: ui(status.set, m), lazy=True)
+                ui(dev.set, "Running on: Laptop NPU"); ui(status.set, "Ready - chat runs on the laptop's NPU. Type a message and press Enter.")
+                if demo: ui(lambda: root.after(300, lambda: send(q=demo)))
+                return
             if not os.path.exists(os.path.join(CHAT_DIR, "done.txt")):
                 ui(lambda: pb.pack(fill="x", padx=6, before=txt))
                 def prog(p): ui(lambda: (pb.configure(value=100 * p), status.set(f"Downloading chat model (about 2.2 GB, one time only): {p*100:.0f}%")))
