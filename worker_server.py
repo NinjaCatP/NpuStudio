@@ -336,7 +336,7 @@ def api_job(kind, a, j):
                     st_ = phone_status(pid); _, r = phone_queue(x["name"], x.get("args"), pid, wait=20 if st_["connected"] else 0)
                     return r or ("Sent to the phone." if st_["connected"] else "The phone is offline; it will run this when it reconnects.")
                 src, act, res, n, dt = eng.handle(a["message"], on_text, confirm=confirm, target="phone", runner=runner)
-            return {"text": j.get("text", ""), "action": str(act) if act else None, "action_result": res, "target": dv, "device": eng.device}
+            return {"text": j.get("text", ""), "action": actions.label(act) if act else None, "action_result": res, "target": dv, "device": eng.device}
         target = "phone" if dv == "phone" else "pc"
         src, act, res, n, dt = eng.handle(a["message"], on_text, confirm=confirm, target=target)
         if target == "phone":   # never run on this PC: hand the allowlisted action back to the phone app
@@ -344,7 +344,7 @@ def api_job(kind, a, j):
             pa = act if act and act.get("name") in actions.PHONE else None
             return {"text": j.get("text", ""), "phone_action": pa, "needs_confirm": bool(pa and pa["name"] in actions.PHONE_CONFIRM),
                     "confirm_text": actions.describe_phone(pa) if pa else None, "target": "phone", "device": eng.device}
-        return {"text": j.get("text", ""), "action": str(act) if act else None, "action_result": res, "target": "pc", "device": eng.device}
+        return {"text": j.get("text", ""), "action": actions.label(act) if act else None, "action_result": res, "target": "pc", "device": eng.device}
     raise ValueError("unknown job type " + kind)
 
 REPORTS = {}

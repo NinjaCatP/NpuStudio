@@ -1,7 +1,7 @@
 """Allowlisted assistant actions for NpuStudio. No arbitrary commands, no deletion, no admin."""
 import os, re, json, glob, time, difflib, subprocess, ctypes, datetime, logging, webbrowser, urllib.parse
 
-CONFIRM = {"close_app", "sleep", "restart", "shutdown", "empty_recycle_bin"}
+CONFIRM = {"close_app", "lock", "sleep", "restart", "shutdown", "log_off", "empty_recycle_bin"}
 NOWIN = 0x08000000  # CREATE_NO_WINDOW
 
 SETTINGS = {"wifi": "network-wifi", "wi-fi": "network-wifi", "network": "network", "bluetooth": "bluetooth",
@@ -43,13 +43,17 @@ open_app {"app": name} | close_app {"app": name} | open_url {"url": url} | web_s
 open_folder {"folder": downloads|documents|pictures|desktop|music|videos} | settings {"page": wifi|bluetooth|display|sound|battery|updates|...}
 volume {"level": 0-100} | brightness_change {"delta": -100..100} | volume_change {"delta": -100..100} | mute {} | unmute {}
 brightness {"level": 0-100} | dark_mode {"on": true|false} | screenshot {} | timer {"minutes": n, "message": text}
-battery {} | time {} | lock {} | sleep {} | restart {} | shutdown {}
+battery {} | time {} | lock {} | sleep {} | restart {} | shutdown {} | log_off {}
 media {"key": play_pause|next|previous|stop} | search_files {"query": name} | clipboard_get {} | clipboard_set {"text": text}
 system_info {} | running_apps {} | night_light {} | empty_recycle_bin {} | recent_files {} | find_phone {}
 Examples:
 User: pull up the calculator -> ACTION: {"name": "open_app", "args": {"app": "calculator"}}
 User: make the screen dimmer -> ACTION: {"name": "brightness_change", "args": {"delta": -15}}
 User: I want to change my bluetooth settings -> ACTION: {"name": "settings", "args": {"page": "bluetooth"}}
+User: restart the device -> ACTION: {"name": "restart", "args": {}}
+You really can control the target PC through these actions (risky ones ask the user Yes/No first). Never say you can't
+interact with or control devices, and never tell the user to type commands (no cmd, PowerShell or shutdown /s etc.).
+If no action fits, say briefly which of the actions above can help.
 For normal questions, just answer in plain text without ACTION."""
 
 # ---------------- app index ----------------
@@ -244,10 +248,8 @@ def route(text):
         return {"name": "timer", "args": {"minutes": mins, "message": msg}}
     if re.search(r"\bbattery\b", t) and not re.search(r"setting", t): return {"name": "battery", "args": {}}
     if re.search(r"^(what('s| is) the )?(time|date|day)( is it)?( today)?$|what time|what('s| is) (the )?(date|day)|today's date", t): return {"name": "time", "args": {}}
-    if re.fullmatch(r"lock( (the|my) )?( ?(pc|computer|laptop|screen))?", t): return {"name": "lock", "args": {}}
-    if re.fullmatch(r"(put (the |my )?(pc|computer|laptop) to sleep|sleep|go to sleep)", t): return {"name": "sleep", "args": {}}
-    if re.fullmatch(r"(restart|reboot)( (the|my) (pc|computer|laptop))?", t): return {"name": "restart", "args": {}}
-    if re.fullmatch(r"(shut ?down|turn off|power off)( (the|my) (pc|computer|laptop))?", t): return {"name": "shutdown", "args": {}}
+    a = power(t)
+    if a: return a
     m = re.match(r"(?:open|show|go to) (?:the |my )?(?:windows )?(.+?) settings?$", t) or re.match(r"(?:open )?settings? (?:for )?(.+)$", t)
     if m and m.group(1).strip() in SETTINGS: return {"name": "settings", "args": {"page": m.group(1).strip()}}
     m = re.search(r"\b(" + "|".join(sorted(map(re.escape, SETTINGS), key=len, reverse=True)) + r") settings?\b", t)
@@ -324,11 +326,30 @@ def parse_action(text, names=None):
         return {"name": m.group(1), "args": args}
     return None
 
+_DEV = r"(?: (?:the|my|this|that))?(?: (?:device|pc|computer|laptop|desktop|machine|system|windows|it|this))?"
+def power(t):
+    """Power phrases (restart/reboot/shut down/turn off/sleep/lock/log off) -> the PC power action; all but lock confirm."""
+    t = re.sub(r"[.!?]+$", "", t.strip().lower())
+    if re.fullmatch(r"(restart|reboot)" + _DEV, t): return {"name": "restart", "args": {}}
+    if re.fullmatch(r"(shut ?down|turn off|power (off|down))" + _DEV, t): return {"name": "shutdown", "args": {}}
+    if re.fullmatch(r"(?:(?:put|send)" + _DEV + r" to sleep|sleep" + _DEV + r"|go to sleep)", t): return {"name": "sleep", "args": {}}
+    if re.fullmatch(r"lock" + _DEV + r"(?: screen)?|lock (?:the |my )?screen", t): return {"name": "lock", "args": {}}
+    if re.fullmatch(r"(log ?off|log ?out|sign ?out|sign me out|log me out)(?: of)?" + _DEV, t): return {"name": "log_off", "args": {}}
+    return None
+NO_PHONE_POWER = "Android doesn't let apps restart, shut down, lock or sign out of the phone. Hold the power button (or side key) to do that."
+_REFUSE = re.compile(r"(unable|not able|can't|cannot|can not)\s+(to\s+)?(physically\s+)?(interact|control|access|restart|reboot|shut|perform|execute|do that)|as an ai|i don't have (the ability|access)|\bshutdown\s*/[a-z]|\bcmd(\.exe)?\b|powershell", re.I)
+def refusal(text): return bool(_REFUSE.search(text or ""))
+def label(a):
+    """'Settings', 'Restart' ... for showing a finished action without the raw dict."""
+    return {"open_app": "Open app", "close_app": "Close app", "open_url": "Open link", "web_search": "Web search", "volume_change": "Volume",
+            "brightness_change": "Brightness", "log_off": "Sign out", "system_info": "System info", "empty_recycle_bin": "Recycle Bin",
+            "find_phone": "Find my phone", "clipboard_get": "Clipboard", "clipboard_set": "Clipboard"}.get(a["name"], a["name"].replace("_", " ").capitalize())
+
 # ---------------- execution ----------------
 def describe(a):
     n, g = a["name"], a.get("args", {})
     return {"close_app": f"close {g.get('app', '?')}", "sleep": "put the PC to sleep", "restart": "restart the PC",
-            "shutdown": "shut down the PC", "empty_recycle_bin": "empty the Recycle Bin (files in it are deleted for good)", "open_url": f"open {g.get('url', '?')}"}.get(n, n)
+            "shutdown": "shut down the PC", "lock": "lock the PC", "log_off": "sign you out of Windows", "empty_recycle_bin": "empty the Recycle Bin (files in it are deleted for good)", "open_url": f"open {g.get('url', '?')}"}.get(n, n)
 
 def execute(a, confirm=None, timer_cb=None):
     """Run an allowlisted action. confirm(msg)->bool is required for CONFIRM actions. Returns a short result string."""
@@ -412,6 +433,7 @@ def _time(g, _):
 def _lock(g, _): ctypes.windll.user32.LockWorkStation(); return "Locked the PC."
 def _sleep(g, _): ctypes.windll.powrprof.SetSuspendState(0, 0, 0); return "Going to sleep."
 def _restart(g, _): subprocess.Popen(["shutdown", "/r", "/t", "5"], creationflags=NOWIN); return "Restarting in 5 seconds."
+def _logoff(g, _): subprocess.Popen(["shutdown", "/l"], creationflags=NOWIN); return "Signing out."
 def _shutdown(g, _): subprocess.Popen(["shutdown", "/s", "/t", "5"], creationflags=NOWIN); return "Shutting down in 5 seconds."
 
 VK = {"play_pause": 0xB3, "next": 0xB0, "previous": 0xB1, "stop": 0xB2}
@@ -478,7 +500,7 @@ def _running(g, _):
 ALL = {"open_app": _open_app, "close_app": _close_app, "open_url": _open_url, "web_search": _search, "open_folder": _folder,
        "settings": _settings, "volume": _volume, "volume_change": _vchange, "mute": _mute, "unmute": _unmute,
        "brightness": _bright, "brightness_change": _bchange, "dark_mode": _dark, "screenshot": _shot, "timer": _timer,
-       "battery": _battery, "time": _time, "lock": _lock, "sleep": _sleep, "restart": _restart, "shutdown": _shutdown,
+       "battery": _battery, "time": _time, "lock": _lock, "sleep": _sleep, "restart": _restart, "shutdown": _shutdown, "log_off": _logoff,
        "media": _media, "search_files": _search_files, "clipboard_get": _clip_get, "clipboard_set": _clip_set,
        "system_info": _sysinfo, "running_apps": _running, "night_light": _night, "empty_recycle_bin": _empty_bin,
        "recent_files": _recent, "find_phone": _findphone}
@@ -555,6 +577,7 @@ def route_phone(text):
     if re.search(r"\b(stop (the )?(sound|ringing|alarm sound|noise)|found it|i found (it|my phone))\b", t): return A("stop_sound")
     if re.search(r"\b(find|ring|locate)( my)? (phone|cell|mobile)\b|\bwhere('s| is| did i (put|leave)) my (phone|cell|mobile)\b|\bmake (my )?phone (ring|beep|loud)", t): return A("find_phone")
     if re.search(r"\b(flash ?light|torch)\b", t): return A("flashlight", on=_on(t))
+    if power(t) or re.search(r"\b(restart|reboot|shut ?down|power off|turn off) (the |my |this )?phone\b", t): return {"name": "_cant", "args": {"text": NO_PHONE_POWER}}
     # brightness (never volume)
     if re.search(r"\b(auto(matic)?[- ]?brightness|adaptive brightness)\b", t): return A("brightness_auto", on=_on(t))
     if re.search(r"\bbright|\bdim\b|\bdimmer\b|\bdarker\b|\bscreen (light|lighter)", t) and not re.search(r"dark (mode|theme)", t):

@@ -38,4 +38,20 @@ PC = [("find my phone", "find_phone"), ("where is my phone", "find_phone"), ("tu
       ("set volume to 30", "volume"), ("set brightness to 50", "brightness"), ("open windows update", "settings")]
 for q, n in PC:
     a = actions.route(q); good = a and a["name"] == n; ok += bool(good); print("OK " if good else "BAD", "PC", q, "->", a)
-print(f"{ok}/{len(P) + len(G) + len(PC)}")
+PW = [("Restart device", "restart"), ("restart the pc", "restart"), ("reboot", "restart"), ("restart it", "restart"), ("reboot this", "restart"),
+      ("restart the laptop", "restart"), ("shut down", "shutdown"), ("shut down the laptop", "shutdown"), ("turn off the computer", "shutdown"),
+      ("power off the device", "shutdown"), ("sleep", "sleep"), ("put the pc to sleep", "sleep"), ("lock", "lock"), ("lock the computer", "lock"),
+      ("log off", "log_off"), ("sign out", "log_off"), ("restart chrome", None), ("turn off the flashlight", None)]
+for q, n in PW:
+    a = actions.route(q); good = (a or {}).get("name") == n and (n is None or n in actions.CONFIRM); ok += bool(good); print("OK " if good else "BAD", "power", q, "->", a)
+PP = ["Restart device", "reboot the phone", "shut down", "turn off my phone", "lock", "sign out"]
+for q in PP:
+    a = actions.route_phone(q); good = a and a["name"] == "_cant" and "Android" in a["args"]["text"]; ok += bool(good); print("OK " if good else "BAD", "phone power", q)
+RF = [("I'm unable to physically interact with devices. Run SHUTDOWN /S /F", True), ("As an AI, I can't restart computers.", True),
+      ("Open cmd and type shutdown /r", True), ("Sure! Here's a short poem about autumn.", False), ("The capital of France is Paris.", False)]
+for t_, exp in RF:
+    r = actions.refusal(t_); ok += r == exp; print("OK " if r == exp else "BAD", "refusal", t_[:40], r)
+LB = [({"name": "settings", "args": {"page": "windows update check"}}, "Settings"), ({"name": "log_off", "args": {}}, "Sign out"), ({"name": "system_info", "args": {}}, "System info")]
+for a_, exp in LB:
+    r = actions.label(a_); ok += r == exp; print("OK " if r == exp else "BAD", "label", r)
+print(f"{ok}/{len(P) + len(G) + len(PC) + len(PW) + len(PP) + len(RF) + len(LB)}")

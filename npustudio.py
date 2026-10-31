@@ -373,7 +373,13 @@ class ChatEngine:
             return "router", a, run(a), 0, 0.0
             if on_action: on_action(a)
             return "router", a, actions.execute(a, confirm, timer_cb), 0, 0.0
-        buf = []; state = {"mode": None}
+        buf = []; state = {"mode": None, "held": not phone, "refused": False}
+        HOLD = 160      # PC target: hold the first words so a "I can't interact with devices / type shutdown /s" answer never shows
+        def emit(s):
+            if not state["held"]: return on_text(s)
+            txt = "".join(buf).lstrip()
+            if actions.refusal(txt): state["refused"] = True; state["mode"] = "refused"; return
+            if len(txt) >= HOLD: state["held"] = False; on_text(txt)
         def tok(sub):
             buf.append(sub)
             if state["mode"] is None:
@@ -381,10 +387,17 @@ class ChatEngine:
                 if head.startswith(("ACTION", "{")) or (len(head) < 7 and "ACTION:".startswith(head)):
                     if head.startswith(("ACTION:", "{")): state["mode"] = "action"
                     return
-                state["mode"] = "text"; on_text("".join(buf))
-            elif state["mode"] == "text": on_text(sub)
+                state["mode"] = "text"; emit("".join(buf))
+            elif state["mode"] == "text": emit(sub)
         n, dt = self.ask(q, tok)
         full = "".join(buf)
+        if not phone and state["mode"] in ("text", "refused"):
+            if state["refused"] or (state["held"] and actions.refusal(full)):
+                logging.info("refusal guard rewrote the answer to %r", q)
+                on_text("I can control the selected PC directly, but I couldn't match that to one of my actions. Try e.g. \"restart the PC\", "
+                        "\"shut down\", \"lock\", \"open Windows Update\", \"volume to 30\" or \"system info\".")
+                return "model", None, None, n, dt
+            if state["held"]: on_text(full.lstrip()); return "model", None, None, n, dt
         a = actions.parse_action(full, actions.PHONE if phone else None)
         if a and phone and not actions.phone_guard(q, a):     # e.g. the model answered "volume" for a brightness request
             logging.info("phone guard rejected %s for %r", a, q); on_text(actions.CANT); return "model", None, None, n, dt
