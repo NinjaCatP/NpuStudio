@@ -533,7 +533,7 @@ def build_chat_tab(root, nb, demo=None):
     def send(_=None, q=None):
         q = q or ent.get().strip()
         if not q or not st["eng"] or st["busy"]: return
-        ent.delete(0, "end"); st["busy"] = True
+        ent.delete(0, "end"); st["busy"] = True; import busy; busy.mark("Chat", True)
         put("You: ", "you"); put(q + "\n\n"); put("AI: ", "ai"); status.set("Thinking...")
         def work():
             try:
@@ -543,7 +543,7 @@ def build_chat_tab(root, nb, demo=None):
                 else: ui(status.set, "Done (understood instantly, no AI needed).")
             except Exception as e:
                 logging.exception("chat"); ui(status.set, f"Error: {e}")
-            ui(put, "\n\n"); st["busy"] = False
+            ui(put, "\n\n"); st["busy"] = False; import busy; busy.mark("Chat", False)
         threading.Thread(target=work, daemon=True).start()
     def stopgen():
         if st["eng"]: st["eng"].stop = True
@@ -574,6 +574,15 @@ def build_chat_tab(root, nb, demo=None):
         except Exception as e:
             logging.exception("chat load"); ui(status.set, f"Chat error: {e}"); ui(dev.set, "Device: error")
     threading.Thread(target=load, daemon=True).start()
+
+def _server_pids():
+    """Desktop: the standalone NpuStudio-Server processes (venv launcher + its python child)."""
+    import subprocess
+    try:
+        out = subprocess.run(["powershell", "-NoProfile", "-Command", "Get-CimInstance Win32_Process | ? { $_.CommandLine -match 'worker_server\\.py' -and $_.CommandLine -notmatch '--share' } | % { $_.ProcessId }"],
+                             capture_output=True, text=True, timeout=20, creationflags=0x08000000).stdout
+        return [int(x) for x in out.split() if x.isdigit()]
+    except Exception: return []
 
 def gui():
     import tkinter as tk
@@ -654,7 +663,7 @@ def gui():
         if nb_ > fr and not messagebox.askyesno("NpuStudio", f"This needs about {nb_/2**30:.1f} GB but only {fr/2**30:.1f} GB of RAM is free right now.\nWindows may page to disk and get slow. Continue anyway?"): return
         if zv.win is not None: zv._close()
         st["out"] = None; lb.configure(image="", text="After"); lb.image = None
-        up = st["up"]; st["busy"] = True
+        up = st["up"]; st["busy"] = True; import busy; busy.mark("Upscale", True)
         def work():
             try:
                 t = time.time()
@@ -669,7 +678,7 @@ def gui():
                 logging.exception("upscale"); root.after(0, lambda: status.set("Out of memory - pick a smaller size."))
             except Exception as e:
                 logging.exception("upscale"); root.after(0, lambda: status.set(f"Error: {e}"))
-            finally: st["busy"] = False
+            finally: st["busy"] = False; busy.mark("Upscale", False)
         status.set(f"Upscaling {sc}x..."); threading.Thread(target=work, daemon=True).start()
     def save():
         if not st["out"]: return
@@ -838,6 +847,38 @@ def gui():
     except Exception: logging.exception("edit tab")
     ttk.Button(bar, text="Send to Edit", command=lambda: (st["out"] or st["img"]) is not None and to_edit(st["out"] or st["img"])).pack(side="left", padx=4)
     ttk.Button(topbar, text="Chip Monitor", command=open_monitor).pack(side="right")
+    def do_restart(force=False, server_too=False):
+        """Restart button: confirm if a job is running, stop the in-app share server, start a fresh copy, exit."""
+        import busy, subprocess, urllib.request
+        jobs = busy.running()
+        try:
+            k = remote.local_key()
+            if k and remote.local_status() == "running":
+                r = urllib.request.urlopen(urllib.request.Request("http://127.0.0.1:47860/api/v1/info", headers={"X-Key": k}), timeout=2)
+                if json.loads(r.read()).get("busy"): jobs.append("A server job (from the phone or the other PC)")
+        except Exception: pass
+        if jobs and not force and not messagebox.askyesno("Restart NpuStudio", f"{', '.join(jobs)} is still running - restart anyway?", parent=root): return
+        logging.info("Restart button (jobs running: %s)", jobs)
+        remote.stop_share()
+        if server_too and remote.role() != "laptop":
+            for pid in _server_pids(): subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, creationflags=0x08000000)
+        for _ in range(20):            # let the share server free port 47860
+            if remote.local_status() in ("stopped", "error") or remote.role() != "laptop": break
+            time.sleep(0.25)
+        py = os.path.join(APP, "venv", "Scripts", "pythonw.exe")
+        if not os.path.exists(py): py = sys.executable
+        args = [a for a in sys.argv[1:] if a != "--autorestart"]
+        subprocess.Popen([py, os.path.join(APP, "npustudio.py")] + args, cwd=APP, close_fds=True,
+                         creationflags=0x00000008 | 0x00000200)     # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+        if server_too and remote.role() != "laptop": remote.start_desktop_server()
+        try: root.destroy()
+        finally: os._exit(0)
+    rstm = tk.Menubutton(topbar, text="\u21bb Restart", relief="raised", padx=8)
+    rm_ = tk.Menu(rstm, tearoff=0); rstm["menu"] = rm_
+    rm_.add_command(label="Restart NpuStudio", command=do_restart)
+    if remote.role() != "laptop": rm_.add_command(label="Restart NpuStudio + NpuStudio-Server", command=lambda: do_restart(server_too=True))
+    rstm.pack(side="right", padx=4)
+    if "--autorestart" in sys.argv: root.after(6000, lambda: do_restart(force=True))
     ttk.Button(topbar, text="Pair phone", command=lambda: open_pair_window(root)).pack(side="right", padx=4)
     import devices
     devv = tk.StringVar(value=devices.get_raw())

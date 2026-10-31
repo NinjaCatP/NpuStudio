@@ -406,6 +406,9 @@ if __name__ == "__main__":
     else: c = config()
     KEY = c["key"]; _status(state="starting", port=int(c["port"]))
     ips = bind_all(int(c["port"]), None if SHARE else c.get("bind"))
+    for _ in range(16):          # just restarted: the old instance may still be freeing the port
+        if _srv: break
+        time.sleep(0.5); ips = bind_all(int(c["port"]), None if SHARE else c.get("bind"))
     def rebind():
         while True:
             time.sleep(30)

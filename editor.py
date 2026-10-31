@@ -314,7 +314,7 @@ def build_edit_tab(root, nb, send_to_upscale=None, dnd=None, upscale=None):
         op(lambda im: im.resize((nw, nh), Image.LANCZOS), "Resized")
     def run_ai(name, fn):
         if not need(): return
-        commit_adj(); st["busy"] = True; pb.configure(mode="indeterminate"); pb.start(12); status.set(name + "...")
+        commit_adj(); st["busy"] = True; __import__("busy").mark("Edit", True); pb.configure(mode="indeterminate"); pb.start(12); status.set(name + "...")
         im = st["img"]; mask = st["mask"]
         def work():
             t = time.time()
@@ -325,7 +325,7 @@ def build_edit_tab(root, nb, send_to_upscale=None, dnd=None, upscale=None):
             except Exception as e:
                 logging.exception("edit " + name); ui(status.set, f"{name} error: {e}")
             finally:
-                st["busy"] = False; ui(lambda: (pb.stop(), pb.configure(mode="determinate", value=100)))
+                st["busy"] = False; __import__("busy").mark("Edit", False); ui(lambda: (pb.stop(), pb.configure(mode="determinate", value=100)))
         threading.Thread(target=work, daemon=True).start()
     def sstat(m): ui(status.set, m)
     def rm_bg(): run_ai("Remove background", lambda im, m: ai.remove_bg(im, sstat))
@@ -471,7 +471,7 @@ def build_edit_tab(root, nb, send_to_upscale=None, dnd=None, upscale=None):
                 wst.set("Couldn't tell what to change. Name the thing (e.g. 'change outfit to a red dress'), brush it, "
                         "or say 'whole image' for a whole-picture change. Nothing was changed."); return
             strength = float(strv.get()); job = cs["job"] = cs["job"] + 1
-            commit_adj(); st["busy"] = True; apb.state(["disabled"]); wpb.configure(mode="indeterminate"); wpb.start(12)
+            commit_adj(); st["busy"] = True; __import__("busy").mark("AI Change", True); apb.state(["disabled"]); wpb.configure(mode="indeterminate"); wpb.start(12)
             def prog(k, n): ui(lambda: (wpb.stop(), wpb.configure(mode="determinate", value=100 * k / n), wst.set(f"Step {k}/{n}")))
             def work():
                 t = time.time()
@@ -492,7 +492,7 @@ def build_edit_tab(root, nb, send_to_upscale=None, dnd=None, upscale=None):
                 except Exception as e:
                     logging.exception("AI change"); ui(wst.set, f"Error: {e}")
                 finally:
-                    st["busy"] = False
+                    st["busy"] = False; __import__("busy").mark("AI Change", False)
                     ui(lambda: (wpb.stop(), wpb.configure(mode="determinate", value=100), w.winfo_exists() and apb.state(["!disabled"])))
             threading.Thread(target=work, daemon=True).start()
         def set_str():

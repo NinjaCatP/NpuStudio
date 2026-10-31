@@ -205,7 +205,7 @@ def build_gen_tab(root, nb, send_to_upscale=None, get_upscaler=None, up_models=N
         try: seed = int(seedv.get())
         except ValueError: seed = random.randint(0, 2**31 - 1); seedv.set(str(seed))
         tw, th = target(); (w, h), up = plan_for(tw, th); upname = next((m for m in (up_models or []) if m.startswith(upv.get())), None); steps = max(1, min(12, int(stepsv.get() or 4))); neg = ng.get()
-        st["busy"] = True; st["cancel"] = False; gb.configure(text="Stop"); pb.configure(value=0)
+        st["busy"] = True; __import__("busy").mark("Image Gen", True); st["cancel"] = False; gb.configure(text="Stop"); pb.configure(value=0)
         def work():
             try:
                 while st["loading"]: time.sleep(0.3)
@@ -238,7 +238,7 @@ def build_gen_tab(root, nb, send_to_upscale=None, get_upscaler=None, up_models=N
             except Exception as e:
                 logging.exception("imagegen"); ui(status.set, f"Error: {e}")
             finally:
-                st["busy"] = False; ui(lambda: gb.configure(text="Generate"))
+                st["busy"] = False; __import__("busy").mark("Image Gen", False); ui(lambda: gb.configure(text="Generate"))
         threading.Thread(target=work, daemon=True).start()
     def save():
         if st["img"] is None: return
