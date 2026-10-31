@@ -19,6 +19,71 @@ MODELS = {
 MAX_BYTES = 18 * 2**30  # memory budget for the upscaled image (Jason: 18 GB)
 Image.MAX_IMAGE_PIXELS = None
 
+
+def build_analyze_tab(root, nb, edit_box, gen_prompt, gtab, dnd=None):
+    """Analyze tab: open/drop a picture -> plain description + Gen-ready prompt + size (same vision model as AI Change)."""
+    import tkinter as tk, threading, time
+    from tkinter import ttk, filedialog
+    from PIL import Image, ImageTk
+    f = ttk.Frame(nb); nb.add(f, text="Analyze")
+    st = {"img": None, "busy": False, "ph": None, "t0": 0}
+    top = ttk.Frame(f); top.pack(fill="x", padx=6, pady=4)
+    devv = tk.StringVar(value="Auto"); txtv = tk.BooleanVar(value=False)
+    ttk.Button(top, text="Open picture...", command=lambda: openf()).pack(side="left")
+    ttk.Label(top, text="  Chip").pack(side="left"); ttk.Combobox(top, textvariable=devv, values=["Auto", "NVIDIA", "Intel Arc", "CPU"], width=10, state="readonly").pack(side="left", padx=4)
+    gob = ttk.Button(top, text="Analyze", command=lambda: run()); gob.pack(side="left", padx=4)
+    ttk.Checkbutton(top, text="Save .txt to output\\analyze", variable=txtv).pack(side="left", padx=8)
+    body = ttk.Frame(f); body.pack(fill="both", expand=True, padx=6)
+    pv = tk.Label(body, text="Open or drop a picture here", bg="#2b2b2b", fg="#bbb", width=48); pv.pack(side="left", fill="both", expand=False)
+    rt = ttk.Frame(body); rt.pack(side="left", fill="both", expand=True, padx=6)
+    sizev = tk.StringVar(value="Size: -"); ttk.Label(rt, textvariable=sizev).pack(anchor="w")
+    ttk.Label(rt, text="Description").pack(anchor="w"); dt = tk.Text(rt, height=6, wrap="word"); dt.pack(fill="both", expand=True)
+    ttk.Label(rt, text="Gen prompt").pack(anchor="w"); pt = tk.Text(rt, height=5, wrap="word"); pt.pack(fill="both", expand=True)
+    br = ttk.Frame(rt); br.pack(fill="x", pady=4)
+    def copy(t): root.clipboard_clear(); root.clipboard_append(t); status.set("Copied.")
+    ttk.Button(br, text="Copy description", command=lambda: copy(dt.get("1.0", "end").strip())).pack(side="left")
+    ttk.Button(br, text="Copy prompt", command=lambda: copy(pt.get("1.0", "end").strip())).pack(side="left", padx=4)
+    def use():
+        p = pt.get("1.0", "end").strip()
+        if p: gen_prompt.delete("1.0", "end"); gen_prompt.insert("1.0", p); nb.select(gtab)
+    ttk.Button(br, text="Use in Gen", command=use).pack(side="left", padx=4)
+    status = tk.StringVar(value="Open or drop a picture, then Analyze."); ttk.Label(f, textvariable=status).pack(anchor="w", padx=6, pady=3)
+    def ui(fn, *a): root.after(0, lambda: fn(*a))
+    def show(im):
+        s = im.copy(); s.thumbnail((380, 520)); st["ph"] = ImageTk.PhotoImage(s); pv.configure(image=st["ph"], text="", width=s.size[0])
+    def load(src):
+        try:
+            im = Image.open(src).convert("RGB") if not isinstance(src, Image.Image) else src.convert("RGB")
+            st["img"] = im; show(im); sizev.set(f"Size: {im.size[0]} x {im.size[1]}"); gob.configure(text="Analyze"); run()
+        except Exception as e: status.set(f"Couldn't open: {e}")
+    def openf():
+        p = filedialog.askopenfilename(filetypes=[("Images", "*.png *.jpg *.jpeg *.webp *.bmp"), ("All", "*.*")])
+        if p: load(p)
+    def tick():
+        if st["busy"]: status.set(f"Analyzing... {time.time() - st['t0']:.0f} s"); root.after(500, tick)
+    def run():
+        if st["img"] is None: status.set("Open a picture first."); return
+        if st["busy"]: return
+        st["busy"] = True; st["t0"] = time.time(); gob.state(["disabled"]); tick()
+        def work():
+            try:
+                import imganalyze, aichange
+                ch = edit_box["api"]["changer"]() if edit_box.get("api") else aichange.Changer()
+                r = imganalyze.analyze(ch, st["img"], devv.get(), lambda m: ui(status.set, f"{m} ({time.time() - st['t0']:.0f} s)"))
+                sp = imganalyze.save_txt(r) if txtv.get() else None
+                def done():
+                    dt.delete("1.0", "end"); dt.insert("1.0", r["description"]); pt.delete("1.0", "end"); pt.insert("1.0", r["prompt"])
+                    status.set(f"Analyzed in {r['seconds']} s on {r['device']}" + (f" - saved {sp}" if sp else "")); gob.configure(text="Re-analyze")
+                ui(done)
+            except Exception as e: logging.exception("analyze tab"); ui(status.set, f"Error: {e}")
+            finally: st["busy"] = False; ui(lambda: gob.state(["!disabled"]))
+        threading.Thread(target=work, daemon=True).start()
+    if dnd:
+        for w_ in (f, pv):
+            try: w_.drop_target_register(dnd); w_.dnd_bind("<<Drop>>", lambda ev: (root.after(10, load, root.tk.splitlist(ev.data)[0]), ev.action)[1])
+            except Exception: logging.exception("analyze dnd")
+    return f
+
 def avail_ram():
     try:
         import ctypes
@@ -908,6 +973,8 @@ def gui():
     try: edit_box["api"] = build_edit_tab(root, nb, to_upscale, DND_FILES if TkinterDnD else None, upscale=edit_upscale)
     except Exception: logging.exception("edit tab")
     ttk.Button(bar, text="Send to Edit", command=lambda: (st["out"] or st["img"]) is not None and to_edit(st["out"] or st["img"])).pack(side="left", padx=4)
+    try: build_analyze_tab(root, nb, edit_box, gen_prompt, gtab, DND_FILES if TkinterDnD else None)
+    except Exception: logging.exception("analyze tab")
     ttk.Button(topbar, text="Chip Monitor", command=open_monitor).pack(side="right")
     def do_restart(force=False, server_too=False):
         """Restart button: confirm if a job is running, stop the in-app share server, start a fresh copy, exit."""
@@ -1028,6 +1095,12 @@ def gui():
             srvm.add_checkbutton(label="Share this laptop's chips", variable=sharev, command=share_toggle)
             if s_ != "running" and sharev.get(): srvm.add_command(label="Start now", command=lambda: (remote.start_share(), root.after(1500, srv_check)))
         elif s_ != "running": srvm.add_command(label="Start NpuStudio-Server", command=lambda: (remote.start_desktop_server(), root.after(3000, srv_check)))
+        import startup
+        srvm.add_separator()
+        swv.set(startup.enabled()); ssv.set(startup.server_on_start())
+        srvm.add_checkbutton(label="Start with Windows", variable=swv, command=lambda: startup.set_enabled(swv.get()))
+        srvm.add_checkbutton(label="Also start the server at Windows sign-in", variable=ssv, command=lambda: startup.set_server_on_start(ssv.get()))
+    swv = tk.BooleanVar(value=False); ssv = tk.BooleanVar(value=True)
     srvm.configure(postcommand=srv_menu)
     def srv_paint():
         c = SRVCOL[srvst["s"]]; srvb.configure(bg=c, activebackground=c,
@@ -1038,6 +1111,20 @@ def gui():
     def srv_loop(): srv_check(); root.after(4000, srv_loop)
     if remote.role() == "laptop" and remote.configured() and remote.sharing(): srvst["s"] = "starting"; remote.start_share()
     root.after(200, srv_loop)
+    def auto_server():   # launched at sign-in (--autostart) or normally: start the server if that setting is on, never twice
+        try:
+            import startup
+            if not startup.server_on_start(): return
+            def w():
+                s_ = remote.local_status()
+                if s_ in ("running", "starting", "conflict"): return
+                if remote.role() == "laptop":
+                    if remote.configured() and remote.sharing(): remote.start_share()
+                else: remote.start_desktop_server()
+                root.after(3000, srv_check)
+            threading.Thread(target=w, daemon=True).start()
+        except Exception: logging.exception("auto server")
+    if "--autostart" in args: root.after(8000, auto_server)   # give the network / Tailscale a few seconds after sign-in
     root.after(1000, desk_poll)
     if "--monitor" in args: root.after(300, open_monitor)
     if "--size" in args: sizev.set(args[args.index("--size") + 1] + "x"); args = [a for a in args if a != args[args.index("--size") + 1]]

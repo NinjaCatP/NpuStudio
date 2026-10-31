@@ -304,6 +304,17 @@ def api_job(kind, a, j):
         im = b64img(a["image"])
         r, d = ai().remove_bg(im, stat) if kind == "remove_bg" else ai().erase(im, b64img(a["mask"]).convert("L").resize(im.size), stat)
         return {"image": imgb64(r), "device": str(d), **save_out(r, "edit", stat, kind.replace("_", "-"))}
+    if kind == "analyze":    # Analyze tab: description + Gen-ready prompt (same vision model as AI Change 'Analysis')
+        import aichange, imganalyze
+        if _chg["c"] is None: _chg["c"] = aichange.Changer()
+        im = b64img(a["image"]).convert("RGB")
+        if a.get("width") and a.get("height"): im.info["orig"] = (int(a["width"]), int(a["height"]))
+        r = imganalyze.analyze(_chg["c"], im, a.get("device", "Auto"), stat)
+        if a.get("width"): r["width"], r["height"] = int(a["width"]), int(a["height"])
+        if a.get("save_txt"):
+            try: r["saved_path"] = imganalyze.save_txt(r, "phone")
+            except Exception: logging.exception("analyze txt")
+        return r
     if kind == "find_mask":  # AI Change: show the auto-mask on the phone so it can be edited before Apply
         import aichange, facefix
         im = b64img(a["image"]).convert("RGB"); instr = a.get("instruction", "")
@@ -327,7 +338,7 @@ def api_job(kind, a, j):
                 mask = facefix.find_mask(im, tgt[0], instr, ana)[0] if (tgt[0] and not facefix.fix_what(instr)) else None
             except Exception: logging.exception("api auto-mask"); mask = None
         _gen = a.get("gen_meta") if isinstance(a.get("gen_meta"), dict) else None; _loose = aichange.gen_loose(_gen, instr)
-        grow = max(-30, min(80 if _loose else 40, int(a.get("grow", 8))))
+        grow = max(-30, min(40, int(a.get("grow", 8))))
         if mask is not None and grow:
             from PIL import ImageFilter
             k = abs(grow) * 2 + 1; mask = mask.filter(ImageFilter.MaxFilter(k) if grow > 0 else ImageFilter.MinFilter(k))

@@ -84,15 +84,24 @@ class Changer:
                 try: self.vlm = None; logging.info("aichange: vision model unloaded (idle)")
                 finally: self.lock.release()
 
+    def prefer(self, device="Auto"):
+        """Analyze tab device picker: Auto = the usual order; a named chip reloads the vision model there."""
+        dv = {"NVIDIA": "GPU.1", "Intel Arc": "GPU.0", "GPU": "GPU", "CPU": "CPU", "NPU": "NPU"}.get(device or "Auto")
+        if dv == getattr(self, "vpref", None): return
+        with self.lock:
+            self.vpref = dv
+            if dv and self.vdev != dv: self.vlm = None; self.vdev = None
+
     def _load_vlm(self, status):
         import openvino_genai as og
         if self.vlm is not None: return
         err = []
+        devs = ([self.vpref] if getattr(self, "vpref", None) else []) + [d for d in VLM_DEVS if d != getattr(self, "vpref", None)]
         for repo, sub, size in VLMS:
             d = os.path.join(MD, sub)
             try: _download(repo, d, size, status)
             except Exception as e: err.append(f"{repo}: {e}"); continue
-            for dev in VLM_DEVS:
+            for dev in devs:
                 try:
                     if status: status(f"Loading vision model on {dev} (first time can take a minute)...")
                     t = time.time()
@@ -270,9 +279,16 @@ class Changer:
                 hs = bg_mask(ai, im, hard)
                 if hs: hard, soft = hs
         if not hard.getbbox(): hard, soft = mask.convert("L"), mask.convert("L")
-        if loose and tgt != "arms":   # From Gen: a bigger area for outfits/background/hair/accessories
-            hard = grow(hard, max(6, int(min(im.size) * 0.015))).point(lambda v: 255 if v > 100 else 0)
-            soft = hard.filter(__import__("PIL.ImageFilter").ImageFilter.GaussianBlur(3))
+        if loose and tgt != "arms" and not re.search(r"\b(background|sky|wall|scene)\b", tgt or "", re.I):
+            # From Gen: a bigger area for outfits/hair/accessories - but only INSIDE her current outline (silhouette kept)
+            try:
+                import facefix
+                pm_ = facefix._person(im)
+                if pm_ is not None:
+                    g_ = np.asarray(grow(hard, max(6, int(min(im.size) * 0.015)))) > 100
+                    hard = Image.fromarray(((g_ & pm_) | (np.asarray(hard) > 127)).astype(np.uint8) * 255)
+                    soft = hard.filter(__import__("PIL.ImageFilter").ImageFilter.GaussianBlur(2))
+            except Exception: logging.exception("from-gen grow")
         hard = protect_face(im, hard, instr); soft = Image.fromarray(np.minimum(np.asarray(soft.convert("L")), np.asarray(hard.filter(__import__("PIL.ImageFilter").ImageFilter.MaxFilter(5)))))
         ctl = control_mode(tgt, rep)
         hair_short = bool(re.fullmatch(r"(?i)\s*hair\s*", tgt or "")) and bool(re.search(r"\b(short|bob|pixie|buzz|bald)\b", rep or "", re.I))

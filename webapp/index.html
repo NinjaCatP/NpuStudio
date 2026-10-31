@@ -111,6 +111,19 @@
   <div id="upJob"></div><div id="upOut" class="out"></div>
 </section>
 
+<section id="tab-ana" class="page hidden">
+  <button id="anaPick" class="wide">📷 Pick a picture to analyze</button>
+  <img id="anaIn" class="preview hidden" alt=""><p id="anaSize" class="muted small"></p>
+  <div class="row"><label class="grow">Desktop chip<select id="anaDev"><option>Auto</option><option>NVIDIA</option><option value="Intel Arc">Intel UHD 770</option><option>CPU</option></select></label>
+    <label class="chk"><input type="checkbox" id="anaTxt"> Save .txt</label></div>
+  <button id="anaGo" class="primary wide">🧠 Analyze</button>
+  <div id="anaJob"></div>
+  <label>Description</label><textarea id="anaDesc" rows="4" readonly></textarea>
+  <div class="row"><button id="anaCopyD" class="grow">📋 Copy description</button></div>
+  <label>Gen prompt</label><textarea id="anaPrompt" rows="4"></textarea>
+  <div class="row"><button id="anaCopyP" class="grow">📋 Copy prompt</button><button id="anaUse" class="grow primary">🎨 Use in Gen</button></div>
+</section>
+
 <section id="tab-conn" class="page hidden">
   <h2>🔗 Connection</h2>
   <div id="connBox" class="kv"></div>
@@ -139,6 +152,7 @@
   <button data-t="gen">🎨<span>Gen</span></button>
   <button data-t="edit">✏️<span>Edit</span></button>
   <button data-t="up">🔍<span>Upscale</span></button>
+  <button data-t="ana">🧠<span>Analyze</span></button>
   <button data-t="mon">📈<span>Monitor</span></button>
   <button data-t="desk">🖥️<span>Desktop</span></button>
 </nav>

@@ -598,7 +598,7 @@ def build_edit_tab(root, nb, send_to_upscale=None, dnd=None, upscale=None):
                 w.drop_target_register(dnd)
                 w.dnd_bind("<<Drop>>", lambda ev: (root.after(10, load, root.tk.splitlist(ev.data)[0]), ev.action)[1])
         except Exception: logging.exception("edit dnd")
-    api = {"load": load, "tab": f, "rm_bg": rm_bg, "erase": erase, "change": change, "st": st, "modev": modev, "prompt": prompt, "fv": fv, "sv": sv, "redraw": redraw}
+    api = {"changer": changer, "load": load, "tab": f, "rm_bg": rm_bg, "erase": erase, "change": change, "st": st, "modev": modev, "prompt": prompt, "fv": fv, "sv": sv, "redraw": redraw}
     return api
 
 if __name__ == "__main__":
