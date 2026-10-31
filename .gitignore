@@ -11,3 +11,4 @@ outputs/
 *.onnx
 *.pth
 *.zip
+webapp/*.apk

@@ -46,27 +46,34 @@ class PairActivity : AppCompatActivity() {
         col.addView(Button(this).apply { text = "Connect"; setOnClickListener {
             val a = HostRules.parseAddress(addr.text.toString())
             if (a == null || key.text.isBlank()) { msg.text = "Enter the address and the key." ; return@setOnClickListener }
-            test(HostRules.Pairing(a.first, a.second, key.text.toString().trim()))
+            val old = HostRules.load(this@PairActivity)
+            val k = key.text.toString().trim()
+            test(if (HostRules.isRemote(a.first)) HostRules.Pairing(old?.home, a.first, a.second, k, old?.mode ?: "auto", a.first)
+                 else HostRules.Pairing(a.first, old?.remote, a.second, k, old?.mode ?: "auto", a.first))
         } })
         msg = label("", 14f, Color.parseColor("#FF6B6B")).apply { gravity = Gravity.START }
         col.addView(msg)
         HostRules.load(this)?.let { addr.setText("${it.host}:${it.port}") }
+        if (intent.getBooleanExtra("scan", false)) scanBtn.performClick()
         setContentView(ScrollView(this).apply { addView(col) })
     }
 
     private fun test(p: HostRules.Pairing) {
-        if (!HostRules.allowed(p.host)) { msg.text = "For safety the app only connects to home-network or Tailscale addresses (192.168.x.x, 10.x, 172.16-31.x, 100.64-127.x, *.ts.net)."; return }
+        val hosts = listOfNotNull(p.host.takeIf { it.isNotEmpty() }, p.home, p.remote).distinct()
+        if (hosts.any { !HostRules.allowed(it) }) { msg.text = "For safety the app only connects to home-network or Tailscale addresses (192.168.x.x, 10.x, 172.16-31.x, 100.64-127.x, *.ts.net)."; return }
         msg.setTextColor(Color.parseColor("#9AA0AD")); msg.text = "Connecting…"
         thread {
-            val code = try {
-                (URL("${p.base}/api/v1/health").openConnection() as HttpURLConnection).run {
-                    connectTimeout = 4000; readTimeout = 6000; setRequestProperty("X-Key", p.key); responseCode
-                }
-            } catch (e: Exception) { -1 }
+            val res = hosts.map { it to HostRules.probe(it, p.port, p.key, 4000) }
             runOnUiThread {
-                when (code) {
-                    200 -> { HostRules.save(this, p); setResult(Activity.RESULT_OK); finish() }
-                    403 -> { msg.setTextColor(Color.parseColor("#FF6B6B")); msg.text = "The desktop refused that key." }
+                val ok = res.firstOrNull { (it.second ?: -1) >= 0 }
+                when {
+                    ok != null -> { HostRules.save(this, p); setResult(Activity.RESULT_OK); finish() }
+                    res.any { it.second == -403 } -> { msg.setTextColor(Color.parseColor("#FF6B6B")); msg.text = "The desktop refused that key." }
+                    p.remote != null && p.home == null || hosts.size > 1 -> {   // saved anyway: remote may only work away from home
+                        HostRules.save(this, p); msg.setTextColor(Color.parseColor("#FFB74D"))
+                        msg.text = "Saved, but none of ${hosts.joinToString()} answered right now. Check NpuStudio-Server and Tailscale."
+                        addr.postDelayed({ setResult(Activity.RESULT_OK); finish() }, 2500)
+                    }
                     else -> { msg.setTextColor(Color.parseColor("#FF6B6B")); msg.text = "Can't reach ${p.base}. Is NpuStudio-Server running, and are you on the same Wi-Fi (or Tailscale)?" }
                 }
             }

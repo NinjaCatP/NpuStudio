@@ -1,7 +1,7 @@
 // NpuStudio Companion web UI. Served by the desktop at /app; the Android shell (window.NpuShell) is optional.
 "use strict";
 const $ = id => document.getElementById(id);
-const UI_VERSION = "1.0.0";
+const UI_VERSION = "1.2.0";
 const Shell = window.NpuShell || null;
 const shellVersion = Shell && Shell.shellVersion ? Number(Shell.shellVersion()) : 0;
 
@@ -109,6 +109,7 @@ function showResult(box, r, base, extra = "") {
     <p class="muted small">${esc(r.device || "")} · ${r.seconds || "?"} s ${extra}</p>`;
   box.querySelector(".sv").onclick = () => saveImg(r.image, name);
   box.querySelector(".sh").onclick = () => shareImg(r.image, name);
+  window.LAST = { b64: r.image, name };
 }
 
 // ---------- tabs ----------
@@ -128,57 +129,251 @@ async function chatSend() {
   const m = $("chatIn").value.trim(); if (!m) return;
   $("chatIn").value = ""; addMsg("me", m); $("chatSend").disabled = true;
   const bot = addMsg("bot", "…"); const box = document.createElement("div"); $("chatLog").appendChild(box);
-  const r = await runJob({ type: "chat", message: m }, box, "Reply", { onUpdate: s => { if (s.text) bot.textContent = s.text; } });
+  const target = $("chatTarget").value;
+  const r = await runJob({ type: "chat", message: m, device: target }, box, "Reply", { onUpdate: s => { if (s.text) bot.textContent = s.text; } });
   box.remove(); $("chatSend").disabled = false;
   if (!r) { if (bot.textContent === "…") bot.textContent = "(no reply)"; return; }
   bot.textContent = r.text || bot.textContent;
+  if (r.phone_action) {
+    const pa = r.phone_action, a = document.createElement("div"); a.className = "act"; bot.appendChild(a);
+    a.textContent = "📱 " + pa.name + " …";
+    if (r.needs_confirm && !confirm(`Do you want me to ${r.confirm_text || pa.name}?`)) a.textContent = "📱 Cancelled: " + (r.confirm_text || pa.name);
+    else a.textContent = "📱 " + pa.name + " → " + await phoneAction(pa);
+  } else if (r.target === "phone" && !r.text) bot.textContent = "(no reply)";
   if (r.action) { const a = document.createElement("div"); a.className = "act"; a.textContent = `⚙ ${r.action}${r.action_result ? " → " + r.action_result : ""}`; bot.appendChild(a); }
   bot.scrollIntoView({ block: "end" });
+}
+// Phone actions: allowlisted, run by the Android app (shell v2+). Nothing here can run arbitrary code.
+async function phoneAction(pa) {
+  const g = pa.args || {};
+  if (pa.name === "save_image" || pa.name === "share_image") {
+    if (!window.LAST) return "No picture yet — make or open one first.";
+    (pa.name === "save_image" ? saveImg : shareImg)(window.LAST.b64, window.LAST.name); return pa.name === "save_image" ? "Saving the last picture." : "Sharing the last picture.";
+  }
+  if (pa.name === "time") return new Date().toLocaleString();
+  if (!(Shell && typeof Shell.phoneAction === "function")) {
+    if (pa.name === "open_url") { window.open(/^https?:/.test(g.url) ? g.url : "https://" + g.url); return "Opened."; }
+    if (pa.name === "web_search") { window.open("https://www.bing.com/search?q=" + encodeURIComponent(g.query || "")); return "Searched."; }
+    if (pa.name === "notify") { notifyDone(g.title || "NpuStudio", g.text || ""); return "Sent."; }
+    return "This needs the updated Android app (v2). " + (Shell ? "Install the new APK." : "Open NpuStudio in the Android app.");
+  }
+  return new Promise(res => { const id = "c" + (++cbSeq); cbs[id] = d => res(d || "Done."); Shell.phoneAction(JSON.stringify(pa), id); setTimeout(() => res("No answer from the phone app."), 15000); });
+}
+(function chatSetup() {
+  const t = localStorage.getItem("npuTarget") || (Shell ? "phone" : "pc"); $("chatTarget").value = t;
+  const hint = () => { $("chatHint").textContent = $("chatTarget").value === "phone"
+    ? "Commands run on this phone: open apps, flashlight, volume, alarms/timers, links, battery, clipboard, save/share the last picture."
+    : "Commands run on the desktop PC: apps, volume, media, screenshot, lock, files, clipboard, system info. Risky ones ask first."; };
+  $("chatTarget").onchange = () => { localStorage.setItem("npuTarget", $("chatTarget").value); hint(); }; hint();
+})();
+async function shellUpdateCheck() {
+  try {
+    const v = await (await fetch("version.json", { cache: "no-store" })).json();
+    if (Shell && shellVersion < (v.latest_shell || v.min_shell || 1)) {
+      const u = location.origin + "/app/NpuStudio-Companion.apk";
+      $("shellUpd").innerHTML = `📲 An Android app update (v${v.latest_shell}) adds phone control and home/remote switching. Install <b>NpuStudio-Companion.apk</b> over this one: open <a href="${u}" target="_blank">${u}</a> in Chrome on this phone, or copy it from H:\\downloads on the desktop. Your pairing is kept.`;
+      $("shellUpd").classList.remove("hidden");
+    }
+  } catch (e) {}
 }
 $("chatSend").onclick = chatSend;
 $("chatIn").onkeydown = e => { if (e.key === "Enter") chatSend(); };
 $("chatNew").onclick = async () => { try { await api("chat/new", {}); } catch (e) {} $("chatLog").innerHTML = ""; };
 
 // ---------- image gen ----------
-$("genRand").onclick = () => $("genSeed").value = Math.floor(Math.random() * 1e9);
+let OPTS = null;
+async function loadOptions() {
+  try { OPTS = await api("options"); } catch (e) { return; }
+  const g = $("genPcSizes"); g.innerHTML = "";
+  (OPTS.gen_sizes || []).forEach(v => { const o = document.createElement("option"); o.value = v; o.textContent = v.replace("x", "×"); g.appendChild(o); });
+}
+function genTarget() {
+  const v = $("genSize").value;
+  if (v === "device") return [Math.round(screen.width * devicePixelRatio), Math.round(screen.height * devicePixelRatio)];
+  if (v === "custom") return [+$("genW").value || 1024, +$("genH").value || 1024];
+  return v.split("x").map(Number);
+}
+function genPlan() {
+  $("genCustom").classList.toggle("hidden", $("genSize").value !== "custom");
+  const [w, h] = genTarget(); $("genPlan").textContent = `Output ${w}×${h}. Drawn at a base size, then upscaled with ${$("genUp").value === "fast" ? "Fast" : "Sharp"} and cropped to fit.`;
+}
+["genSize", "genUp", "genW", "genH"].forEach(id => $(id).addEventListener("input", genPlan));
+$("genRand").onclick = () => $("genSeed").value = Math.floor(Math.random() * 2147483647);
 $("genGo").onclick = async () => {
   const p = $("genPrompt").value.trim(); if (!p) return $("genPrompt").focus();
-  let [w, h] = $("genSize").value === "device"
-    ? [Math.round(screen.width * devicePixelRatio), Math.round(screen.height * devicePixelRatio)]
-    : $("genSize").value.split("x").map(Number);
+  const [w, h] = genTarget();
+  if (!(w >= 64 && h >= 64 && w <= 16384 && h <= 16384)) return alert("Size must be between 64 and 16384 on each side.");
   $("genGo").disabled = true;
-  const r = await runJob({ type: "gen", prompt: p, width: w, height: h, steps: +$("genSteps").value || 4, seed: +$("genSeed").value || 0 }, $("genJob"), "Image Gen");
-  $("genGo").disabled = false; if (r) showResult($("genOut"), r, "npustudio-gen", `· ${w}×${h}`);
+  const r = await runJob({ type: "gen", prompt: p, width: w, height: h, steps: +$("genSteps").value || 4, seed: +$("genSeed").value || 0, upscaler: $("genUp").value }, $("genJob"), "Image Gen");
+  $("genGo").disabled = false;
+  if (r) { showResult($("genOut"), r, "npustudio-gen", `· ${w}×${h}`); addSend($("genOut"), r.image); }
 };
-
-// ---------- edit / AI change ----------
-let editSrc = null, upSrc = null;
-$("editPick").onclick = async () => { const d = await pickImage(); if (!d) return; editSrc = d; $("editIn").src = d; $("editIn").classList.remove("hidden"); $("editOut").innerHTML = ""; };
-async function editRun(kind) {
-  if (!editSrc) return alert("Pick a photo first.");
-  const instr = $("editInstr").value.trim(); if (kind === "change" && !instr) return $("editInstr").focus();
-  const im = await shrink(editSrc, 1536);
-  const body = kind === "change" ? { type: "change", image: im.b64, instruction: instr, method: $("editMethod").value } : { type: "remove_bg", image: im.b64 };
-  $("editGo").disabled = $("editBg").disabled = true;
-  const r = await runJob(body, $("editJob"), kind === "change" ? "AI Change" : "Remove background");
-  $("editGo").disabled = $("editBg").disabled = false;
-  if (r) showResult($("editOut"), r, kind === "change" ? "npustudio-edit" : "npustudio-cutout", r.method ? "· " + esc(r.method) : "");
+function addSend(box, b64) {
+  const row = document.createElement("div"); row.className = "row";
+  row.innerHTML = `<button class="grow">✏️ Send to Edit</button><button class="grow">🔍 Send to Upscale</button>`;
+  row.children[0].onclick = () => { editLoad("data:image/png;base64," + b64, true); tabTo("edit"); };
+  row.children[1].onclick = () => { upLoad("data:image/png;base64," + b64); tabTo("up"); };
+  box.appendChild(row);
 }
-$("editGo").onclick = () => editRun("change");
-$("editBg").onclick = () => editRun("remove_bg");
+function tabTo(t) { const b = document.querySelector(`#tabs button[data-t="${t}"]`); if (b) b.click(); }
+
+// ---------- edit (laptop Edit tab: transform, crop, resize, adjust, brush mask, AI erase / remove bg / AI Change) ----------
+const ED = { cur: null, undo: [], redo: [], w: 0, h: 0 };
+const EDIT_MAX = 2048;   // working size sent to the desktop
+async function editLoad(src, fromResult) {
+  const s = await shrinkUrl(src, EDIT_MAX);
+  if (ED.cur && !fromResult) { ED.undo.push(ED.cur); ED.redo = []; }
+  else if (ED.cur) { ED.undo.push(ED.cur); ED.redo = []; }
+  setEdit(s);
+}
+async function shrinkUrl(src, max) { const r = await shrink(src, max, "image/png"); return "data:image/png;base64," + r.b64; }
+function setEdit(url) {
+  ED.cur = url; const img = $("editIn"); img.onload = () => {
+    ED.w = img.naturalWidth; ED.h = img.naturalHeight; const cv = $("maskCv");
+    cv.width = ED.w; cv.height = ED.h; fitMask();
+    $("editInfo").textContent = `${ED.w}×${ED.h}`; previewAdj();
+  };
+  img.src = url; $("stage").classList.remove("hidden"); $("editTools").classList.remove("hidden");
+  $("editUndo").disabled = !ED.undo.length; $("editRedo").disabled = !ED.redo.length;
+}
+function fitMask() { const img = $("editIn"), cv = $("maskCv"); cv.style.left = img.offsetLeft + "px"; cv.style.width = img.clientWidth + "px"; cv.style.height = img.clientHeight + "px"; }
+window.addEventListener("resize", fitMask);
+function pushEdit(url) { ED.undo.push(ED.cur); ED.redo = []; clearMask(); setEdit(url); }
+$("editUndo").onclick = () => { if (!ED.undo.length) return; ED.redo.push(ED.cur); setEdit(ED.undo.pop()); };
+$("editRedo").onclick = () => { if (!ED.redo.length) return; ED.undo.push(ED.cur); setEdit(ED.redo.pop()); };
+$("editPick").onclick = async () => { const d = await pickImage(); if (!d) return; ED.undo = []; ED.redo = []; ED.cur = null; clearMask(); await editLoad(d); $("editOut").innerHTML = ""; };
+async function canvasOp(fn) {      // draws the current image through fn(ctx, img) on a new canvas
+  const im = await loadImg(ED.cur); const c = document.createElement("canvas"); fn(c, c.getContext("2d"), im);
+  pushEdit(c.toDataURL("image/png"));
+}
+document.querySelectorAll("[data-tf]").forEach(b => b.onclick = () => canvasOp((c, x, im) => {
+  const t = b.dataset.tf, w = im.naturalWidth, h = im.naturalHeight, rot = t === "rotl" || t === "rotr";
+  c.width = rot ? h : w; c.height = rot ? w : h; x.translate(c.width / 2, c.height / 2);
+  if (t === "rotl") x.rotate(-Math.PI / 2); if (t === "rotr") x.rotate(Math.PI / 2); if (t === "r180") x.rotate(Math.PI);
+  if (t === "fliph") x.scale(-1, 1); if (t === "flipv") x.scale(1, -1);
+  x.drawImage(im, -w / 2, -h / 2);
+}));
+$("cropGo").onclick = () => { const r = +$("cropAsp").value; if (!r) return; canvasOp((c, x, im) => {
+  const w = im.naturalWidth, h = im.naturalHeight; let cw = w, ch = Math.round(w / r); if (ch > h) { ch = h; cw = Math.round(h * r); }
+  c.width = cw; c.height = ch; x.drawImage(im, (w - cw) / 2, (h - ch) / 2, cw, ch, 0, 0, cw, ch);
+}); };
+$("rsGo").onclick = () => { const p = Math.max(5, Math.min(400, +$("rsPct").value || 100)) / 100; canvasOp((c, x, im) => {
+  c.width = Math.max(1, Math.round(im.naturalWidth * p)); c.height = Math.max(1, Math.round(im.naturalHeight * p)); x.imageSmoothingQuality = "high"; x.drawImage(im, 0, 0, c.width, c.height);
+}); };
+const FILT = { "None": "", "B&W": "grayscale(1)", "Sepia": "sepia(1)", "Blur": "blur(2px)", "Sharpen": "contrast(1.15)", "Warm": "sepia(0.25) saturate(1.2)", "Cool": "hue-rotate(12deg) saturate(0.9) brightness(1.03)" };
+function adjFilter() { return `brightness(${$("adjB").value}) contrast(${$("adjC").value}) saturate(${$("adjS").value}) ${FILT[$("adjF").value] || ""}`; }
+function previewAdj() { $("bV").textContent = (+$("adjB").value).toFixed(2); $("cV").textContent = (+$("adjC").value).toFixed(2); $("sV").textContent = (+$("adjS").value).toFixed(2); $("editIn").style.filter = adjFilter(); }
+["adjB", "adjC", "adjS", "adjF"].forEach(id => $(id).addEventListener("input", previewAdj));
+function resetAdj() { $("adjB").value = $("adjC").value = $("adjS").value = 1; $("adjF").value = "None"; previewAdj(); }
+$("adjReset").onclick = resetAdj;
+$("adjGo").onclick = async () => { const f = adjFilter(); await canvasOp((c, x, im) => { c.width = im.naturalWidth; c.height = im.naturalHeight; x.filter = f; x.drawImage(im, 0, 0); }); resetAdj(); };
+// brush mask
+let painting = false;
+$("brush").oninput = () => $("brV").textContent = $("brush").value;
+$("brOn").onchange = () => $("stage").classList.toggle("paint", $("brOn").checked);
+function clearMask() { const cv = $("maskCv"); cv.getContext("2d").clearRect(0, 0, cv.width, cv.height); cv.dataset.dirty = ""; }
+$("maskClear").onclick = clearMask;
+function dab(e) {
+  const cv = $("maskCv"), r = cv.getBoundingClientRect(), s = cv.width / r.width, x = cv.getContext("2d");
+  x.fillStyle = "#ff2040"; x.beginPath(); x.arc((e.clientX - r.left) * s, (e.clientY - r.top) * s, (+$("brush").value / 2) * s, 0, 7); x.fill(); cv.dataset.dirty = "1";
+}
+$("maskCv").addEventListener("pointerdown", e => { painting = true; $("maskCv").setPointerCapture(e.pointerId); dab(e); });
+$("maskCv").addEventListener("pointermove", e => { if (painting) dab(e); });
+["pointerup", "pointercancel"].forEach(t => $("maskCv").addEventListener(t, () => painting = false));
+function maskB64() {
+  const cv = $("maskCv"); if (!cv.dataset.dirty) return null;
+  const m = document.createElement("canvas"); m.width = cv.width; m.height = cv.height; const x = m.getContext("2d");
+  x.fillStyle = "#000"; x.fillRect(0, 0, m.width, m.height); x.globalCompositeOperation = "source-over";
+  const src = cv.getContext("2d").getImageData(0, 0, cv.width, cv.height), d = x.getImageData(0, 0, m.width, m.height);
+  for (let i = 3; i < src.data.length; i += 4) if (src.data[i] > 0) { d.data[i - 3] = d.data[i - 2] = d.data[i - 1] = 255; }
+  x.putImageData(d, 0, 0); return m.toDataURL("image/png").split(",")[1];
+}
+const curB64 = () => ED.cur.split(",")[1];
+async function editJob(body, label) {
+  if (!ED.cur) return alert("Pick a photo first.");
+  document.querySelectorAll("#editTools button").forEach(b => b.disabled = true);
+  const r = await runJob(body, $("editJob"), label);
+  document.querySelectorAll("#editTools button").forEach(b => b.disabled = false);
+  if (r) { pushEdit("data:image/png;base64," + r.image); $("editOut").innerHTML = `<p class="muted small">${esc(label)} done on ${esc(r.device || "")} in ${r.seconds || "?"} s${r.method ? " · " + esc(r.method) : ""}. Undo to revert.</p>`; }
+}
+$("eraseGo").onclick = () => { const m = maskB64(); if (!m) return alert("Paint over what to erase first (tick Paint)."); editJob({ type: "erase", image: curB64(), mask: m }, "AI erase"); };
+$("editBg").onclick = () => editJob({ type: "remove_bg", image: curB64() }, "Remove background");
+$("editStr").oninput = () => $("stV").textContent = (+$("editStr").value).toFixed(2);
+$("editGrow").oninput = () => $("grV").textContent = (+$("editGrow").value > 0 ? "+" : "") + $("editGrow").value;
+$("editWhole").onchange = () => { $("editStr").value = $("editWhole").checked ? 0.4 : 1; $("editStr").oninput(); };
+$("editGo").onclick = () => {
+  const instr = $("editInstr").value.trim(); if (!instr) return $("editInstr").focus();
+  const m = $("editWhole").checked ? null : maskB64();
+  editJob({ type: "change", image: curB64(), instruction: instr, method: $("editMethod").value, strength: +$("editStr").value,
+            grow: +$("editGrow").value, whole: $("editWhole").checked, ...(m ? { mask: m } : {}) }, "AI Change");
+};
+$("editSave").onclick = () => ED.cur && saveImg(curB64(), `npustudio-edit-${Date.now()}.png`);
+$("editShare").onclick = () => ED.cur && shareImg(curB64(), `npustudio-edit-${Date.now()}.png`);
+$("editToUp").onclick = () => { if (ED.cur) { upLoad(ED.cur); tabTo("up"); } };
 
 // ---------- upscale ----------
-$("upPick").onclick = async () => {
-  const d = await pickImage(); if (!d) return; upSrc = d; $("upIn").src = d; $("upIn").classList.remove("hidden"); $("upOut").innerHTML = "";
-  const i = await loadImg(d); $("upInfo").textContent = `${i.naturalWidth}×${i.naturalHeight}`;
-};
+let upSrc = null, upDim = null, upScale = 4;
+async function upLoad(d) { upSrc = d; $("upIn").src = d; $("upIn").classList.remove("hidden"); $("upOut").innerHTML = ""; const i = await loadImg(d); upDim = [i.naturalWidth, i.naturalHeight]; upEstimate(); }
+document.querySelectorAll("#upScale button").forEach(b => b.onclick = () => {
+  document.querySelectorAll("#upScale button").forEach(x => x.classList.toggle("on", x === b)); upScale = +b.dataset.v; upEstimate();
+});
+$("upPick").onclick = async () => { const d = await pickImage(); if (d) upLoad(d); };
+let upChk = null;
+async function upEstimate() {
+  if (!upDim) { $("upInfo").textContent = ""; return; }
+  $("upInfo").textContent = `Picture ${upDim[0]}×${upDim[1]}`;
+  try { upChk = await api("upscale/check", { width: upDim[0], height: upDim[1], scale: upScale }); } catch (e) { upChk = null; return; }
+  const c = upChk;
+  $("upEst").className = "small " + (c.ok ? "muted" : "warn");
+  $("upEst").innerHTML = c.ok
+    ? `Result ${c.out_width}×${c.out_height} (${c.megapixels} MP), about ${c.memory_gb} GB of the ${c.memory_limit_gb} GB limit${upScale >= 8 ? " · 2 passes" : ""}.`
+    : `⚠ ${esc(c.reason)}.<br>Upscale will first shrink the picture to ${c.fit_width}×${c.fit_height}, giving ${c.fit_width * upScale}×${c.fit_height * upScale}.`;
+}
 $("upGo").onclick = async () => {
   if (!upSrc) return alert("Pick a photo first.");
-  const sc = +$("upScale").value, im = await shrink(upSrc, Math.max(512, Math.floor(8192 / sc)), "image/png");
+  const sc = upScale; let max = Math.max(...upDim);
+  if (upChk && !upChk.ok) {
+    if (!confirm(`${upChk.reason}.\n\nShrink the picture to ${upChk.fit_width}×${upChk.fit_height} first? (result ${upChk.fit_width * sc}×${upChk.fit_height * sc})`)) return;
+    max = Math.max(upChk.fit_width, upChk.fit_height);
+  }
+  const im = await shrink(upSrc, max, "image/png");
   $("upGo").disabled = true;
-  const r = await runJob({ type: "upscale", image: im.b64, scale: sc, model: $("upModel").value, format: "PNG" }, $("upJob"), "Upscale");
-  $("upGo").disabled = false; if (r) showResult($("upOut"), r, "npustudio-upscale", `· ${im.w * sc}×${im.h * sc}`);
+  const r = await runJob({ type: "upscale", image: im.b64, scale: sc, model: $("upModel").value, device: $("upDev").value, format: $("upFmt").value }, $("upJob"), `Upscale ${sc}×`);
+  $("upGo").disabled = false;
+  if (r) {
+    const ext = r.format === "JPEG" ? "jpg" : "png";
+    showResult($("upOut"), r, "npustudio-upscale", `· ${r.width}×${r.height} ${r.format || ""}`);
+    $("upOut").querySelectorAll("button").forEach(b => { const f = b.onclick; b.onclick = () => (b.classList.contains("sv") ? saveImg : shareImg)(r.image, `npustudio-upscale-${sc}x-${Date.now()}.${ext}`); });
+  }
 };
+
+// ---------- connection ----------
+const SV = typeof Shell?.getConnection === "function";    // shell v2+ can switch home/remote hosts
+let LAT = null;
+async function ping() {
+  const t = performance.now(); await api("health"); LAT = Math.round(performance.now() - t); return LAT;
+}
+function hostKind(h) { return /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(h) || h.endsWith(".ts.net") ? "Remote (Tailscale)" : "Home (Wi-Fi)"; }
+function connPill(ok) {
+  const p = $("conn"); p.className = "pill " + (ok ? "ok" : "bad");
+  p.textContent = ok ? `🔗 ${hostKind(location.hostname).split(" ")[0]} · ${LAT} ms` : "🔗 Offline";
+}
+async function connPage() {
+  let st = "offline"; try { await ping(); st = `online, ${LAT} ms`; } catch (e) {}
+  const c = SV ? JSON.parse(Shell.getConnection()) : null;
+  $("connBox").innerHTML = `<b>Connected to</b><span>${esc(location.hostname)}:${esc(location.port)}</span><b>Type</b><span>${hostKind(location.hostname)}</span>
+    <b>Status</b><span>${st}</span><b>App</b><span>${SV ? "Android app v" + shellVersion : (Shell ? "Android app v" + shellVersion + " (update for home/remote switching)" : "browser")}</span>`;
+  $("connShell").classList.toggle("hidden", !SV);
+  if (c) { $("cHome").value = c.home || ""; $("cRemote").value = c.remote || ""; $("cMode").value = c.mode || "auto"; }
+  $("connNote").textContent = SV ? "Auto tries the home address first and switches to the remote (Tailscale) address when home can't be reached. Tailscale must be on for remote."
+    : (Shell ? "Install the new NpuStudio-Companion.apk to save a home and a remote address and switch between them." : "In a browser, open this page at the address you want to use.");
+}
+$("conn").onclick = () => { document.querySelectorAll("#tabs button").forEach(x => x.classList.remove("on")); document.querySelectorAll("main .page").forEach(p => p.classList.toggle("hidden", p.id !== "tab-conn")); clearInterval(monTimer); connPage(); };
+$("cSave").onclick = () => { const r = Shell.setConnection($("cHome").value.trim(), $("cRemote").value.trim(), $("cMode").value); if (r) alert(r); };
+$("cRepair").onclick = () => Shell.rePair();
+$("cTest").onclick = () => { $("connNote").textContent = "Testing…"; const id = "c" + (++cbSeq);
+  cbs[id] = d => { const r = JSON.parse(d || "{}"); $("connNote").textContent = Object.entries(r).map(([k, v]) => `${k}: ${v == null ? "unreachable" : v + " ms"}`).join("   ·   ") || "Nothing saved."; };
+  Shell.probe(id); };
 
 // ---------- monitor ----------
 const na = v => (v === null || v === undefined || v === "N/A") ? "N/A" : (typeof v === "number" ? (Number.isInteger(v) ? v : +v.toFixed(1)) : v);
@@ -218,18 +413,19 @@ $("unpair").onclick = () => { if (!confirm("Forget the pairing key?")) return; l
 
 // ---------- start ----------
 async function start() {
+  shellUpdateCheck();
   if (!key()) { $("pair").classList.remove("hidden"); return; }
   try {
-    await api("health"); $("conn").textContent = "Desktop online"; $("conn").className = "pill ok";
+    await ping(); connPill(true); loadOptions().then(genPlan);
     $("pair").classList.add("hidden"); $("main").classList.remove("hidden"); $("tabs").classList.remove("hidden");
     try { const v = await (await fetch("version.json", { cache: "no-store" })).json(); if (Shell && v.min_shell > shellVersion) alert("Please update the NpuStudio Companion app (this UI needs shell v" + v.min_shell + ")."); } catch (e) {}
     if (window.__startTab) { const b = document.querySelector(`#tabs button[data-t="${window.__startTab}"]`); if (b) b.click(); }
     if (!Shell && window.Notification && Notification.permission === "default") Notification.requestPermission();
   } catch (e) {
     if (e.status === 403) { $("pairMsg").textContent = "That key was refused."; $("pair").classList.remove("hidden"); $("main").classList.add("hidden"); $("tabs").classList.add("hidden"); }
-    else { $("conn").textContent = "Offline"; $("conn").className = "pill bad"; }
+    else connPill(false);
   }
 }
 $("pairBtn").onclick = () => { localStorage.setItem("npuKey", $("pairKey").value.trim()); $("pairMsg").textContent = ""; start(); };
-setInterval(async () => { if (!key()) return; try { await api("health"); $("conn").textContent = "Desktop online"; $("conn").className = "pill ok"; } catch (e) { $("conn").textContent = "Offline"; $("conn").className = "pill bad"; } }, 10000);
+setInterval(async () => { if (!key()) return; try { await ping(); connPill(true); } catch (e) { connPill(false); if (SV && Shell.fallback) Shell.fallback(); } }, 10000);
 start();

@@ -6,7 +6,7 @@
 <title>NpuStudio Companion</title>
 <link rel="stylesheet" href="app.css">
 </head><body>
-<header><div class="brand"><span class="logo">N</span> NpuStudio</div><div id="conn" class="pill">…</div></header>
+<header><div class="brand"><span class="logo">N</span> NpuStudio</div><button id="conn" class="pill">🔗 …</button></header>
 
 <section id="pair" class="page hidden">
   <h2>Pair with your desktop</h2>
@@ -23,7 +23,10 @@
     <input id="chatIn" placeholder="Ask anything, or e.g. &quot;open notepad&quot;" enterkeyhint="send">
     <button id="chatSend" class="primary">Send</button>
   </div>
-  <div class="row"><button id="chatNew" class="ghost">New chat</button><span class="muted small">PC actions run on the desktop. Risky ones ask first.</span></div>
+  <div class="row"><button id="chatNew" class="ghost">New chat</button>
+    <label class="small">Control <select id="chatTarget"><option value="phone">This phone</option><option value="pc">Desktop PC</option></select></label></div>
+  <div id="chatHint" class="muted small"></div>
+  <div id="shellUpd" class="warn hidden"></div>
 </section>
 
 <section id="tab-gen" class="page hidden">
@@ -32,48 +35,87 @@
     <optgroup label="Phone wallpaper">
       <option value="1080x2400" selected>Phone 1080×2400 (most Android)</option>
       <option value="1440x3200">Phone QHD+ 1440×3200</option>
-      <option value="1080x1920">Phone 1080×1920 (16:9)</option>
+      <option value="1080x1920">Phone 1080×1920</option>
+      <option value="1440x2560">Phone 1440×2560</option>
       <option value="1170x2532">iPhone 1170×2532</option>
       <option value="1290x2796">iPhone Pro Max 1290×2796</option>
       <option value="device">This phone's screen</option>
     </optgroup>
-    <optgroup label="General">
-      <option value="512x512">512×512</option>
-      <option value="768x768">768×768</option>
-      <option value="1024x1024">1024×1024</option>
-      <option value="768x512">768×512</option>
-      <option value="1920x1080">1920×1080 (desktop wallpaper)</option>
-      <option value="2560x1440">2560×1440</option>
-      <option value="3840x2160">3840×2160 (4K)</option>
-    </optgroup>
+    <optgroup label="Same as the PC app" id="genPcSizes"></optgroup>
+    <optgroup label="Other"><option value="3840x2160">3840×2160 (4K)</option><option value="custom">Custom…</option></optgroup>
   </select></label>
+  <div class="row hidden" id="genCustom"><label class="grow">Width<input id="genW" type="number" min="64" max="16384" value="1080"></label><label class="grow">Height<input id="genH" type="number" min="64" max="16384" value="2400"></label></div>
   <div class="row">
+    <label class="grow">Upscale with<select id="genUp"><option value="sharp">Sharp</option><option value="fast">Fast</option></select></label>
     <label class="grow">Steps<input id="genSteps" type="number" min="1" max="50" value="4"></label>
-    <label class="grow">Seed<input id="genSeed" type="number" value="42"></label>
-    <button id="genRand" class="ghost">🎲</button>
   </div>
+  <div class="row"><label class="grow">Seed<input id="genSeed" type="number" value="42"></label><button id="genRand" class="ghost">🎲 Random</button></div>
+  <p id="genPlan" class="muted small"></p>
   <button id="genGo" class="primary wide">Generate</button>
   <div id="genJob"></div><div id="genOut" class="out"></div>
 </section>
 
 <section id="tab-edit" class="page hidden">
-  <button id="editPick" class="wide">📷 Pick a photo</button>
-  <img id="editIn" class="preview hidden" alt="">
-  <label>What should change?<input id="editInstr" placeholder="change the outfit to a red dress"></label>
-  <label>Method<select id="editMethod"><option>Auto</option><option>Redraw</option><option>Recolor</option></select></label>
-  <div class="row"><button id="editGo" class="primary grow">AI Change</button><button id="editBg" class="grow">Remove background</button></div>
+  <div class="row"><button id="editPick" class="grow">📷 Pick a photo</button><button id="editUndo" class="ghost" disabled>↶ Undo</button><button id="editRedo" class="ghost" disabled>↷</button></div>
+  <div id="stage" class="stage hidden"><img id="editIn" alt=""><canvas id="maskCv"></canvas></div>
+  <p id="editInfo" class="muted small"></p>
+  <div id="editTools" class="hidden">
+    <details open><summary>Transform</summary>
+      <div class="row wrap"><button data-tf="rotl">⟲ 90</button><button data-tf="rotr">⟳ 90</button><button data-tf="r180">180</button><button data-tf="fliph">Flip H</button><button data-tf="flipv">Flip V</button></div>
+      <div class="row"><label class="grow">Crop<select id="cropAsp"><option value="">Free (no crop)</option><option value="1">1:1</option><option value="1.3333">4:3</option><option value="1.5">3:2</option><option value="1.6">16:10</option><option value="1.7778">16:9</option><option value="1.6">2880x1800 (screen)</option><option value="0.5625">9:16</option><option value="0.45">Phone 9:20</option></select></label><button id="cropGo">Apply crop</button></div>
+      <div class="row"><label class="grow">Resize %<input id="rsPct" type="number" min="5" max="400" value="50"></label><button id="rsGo">Resize</button></div>
+    </details>
+    <details><summary>Adjust &amp; filters</summary>
+      <label>Brightness <span id="bV">1.00</span><input type="range" id="adjB" min="0.2" max="2" step="0.05" value="1"></label>
+      <label>Contrast <span id="cV">1.00</span><input type="range" id="adjC" min="0.2" max="2" step="0.05" value="1"></label>
+      <label>Saturation <span id="sV">1.00</span><input type="range" id="adjS" min="0" max="2.5" step="0.05" value="1"></label>
+      <label>Filter<select id="adjF"><option>None</option><option>B&amp;W</option><option>Sepia</option><option>Blur</option><option>Sharpen</option><option>Warm</option><option>Cool</option></select></label>
+      <div class="row"><button id="adjGo" class="primary grow">Apply</button><button id="adjReset" class="grow">Reset</button></div>
+    </details>
+    <details open><summary>Brush mask (for AI erase / AI change)</summary>
+      <div class="row"><label class="grow">Brush <span id="brV">40</span> px<input type="range" id="brush" min="5" max="200" value="40"></label><label class="chk"><input type="checkbox" id="brOn"> Paint</label></div>
+      <div class="row"><button id="maskClear" class="grow">Clear mask</button><button id="eraseGo" class="grow">AI erase</button><button id="editBg" class="grow">Remove background</button></div>
+    </details>
+    <details open><summary>AI Change</summary>
+      <label>What should change?<input id="editInstr" placeholder="change the outfit to a red dress"></label>
+      <div class="row"><label class="grow">Method<select id="editMethod"><option>Auto</option><option>Redraw</option><option>Recolor</option></select></label>
+        <label class="chk"><input type="checkbox" id="editWhole"> Whole picture</label></div>
+      <label>Strength <span id="stV">1.00</span><input type="range" id="editStr" min="0.2" max="1" step="0.05" value="1"></label>
+      <label>Grow / shrink mask <span id="grV">+8</span> px<input type="range" id="editGrow" min="-30" max="40" step="1" value="8"></label>
+      <p class="muted small">No brush = the target is found automatically from your words. Redraw = draw a new thing; Recolor = same thing, new colour.</p>
+      <button id="editGo" class="primary wide">AI Change</button>
+    </details>
+    <div class="row"><button id="editSave" class="grow">💾 Save</button><button id="editShare" class="grow">📤 Share</button><button id="editToUp" class="grow">🔍 To Upscale</button></div>
+  </div>
   <div id="editJob"></div><div id="editOut" class="out"></div>
 </section>
 
 <section id="tab-up" class="page hidden">
   <button id="upPick" class="wide">📷 Pick a photo</button>
   <img id="upIn" class="preview hidden" alt=""><p id="upInfo" class="muted small"></p>
+  <label>Scale</label>
+  <div class="seg" id="upScale"><button data-v="2">2×</button><button data-v="4" class="on">4×</button><button data-v="8">8×</button><button data-v="16">16×</button></div>
   <div class="row">
-    <label class="grow">Scale<select id="upScale"><option>2</option><option selected>4</option><option>8</option></select></label>
-    <label class="grow">Model<select id="upModel"><option value="sharp">Sharp (Real-ESRGAN)</option><option value="fast">Fast</option></select></label>
+    <label class="grow">Model<select id="upModel"><option value="sharp">Sharp (Real-ESRGAN x4plus)</option><option value="fast">Fast (Intel SR-1032)</option></select></label>
+    <label class="grow">Desktop chip<select id="upDev"><option>Auto</option><option>NVIDIA</option><option value="Intel Arc">Intel UHD 770</option><option>CPU</option><option>All</option></select></label>
   </div>
+  <label>Result format<select id="upFmt"><option value="AUTO">Auto (PNG, JPEG when huge)</option><option>PNG</option><option>JPEG</option></select></label>
+  <p id="upEst" class="small"></p>
   <button id="upGo" class="primary wide">Upscale</button>
   <div id="upJob"></div><div id="upOut" class="out"></div>
+</section>
+
+<section id="tab-conn" class="page hidden">
+  <h2>🔗 Connection</h2>
+  <div id="connBox" class="kv"></div>
+  <div id="connShell">
+    <label>Home address (Wi-Fi)<input id="cHome" placeholder="192.168.0.230" autocomplete="off"></label>
+    <label>Remote address (Tailscale 100.x.x.x or name.tailnet.ts.net)<input id="cRemote" placeholder="100.x.x.x" autocomplete="off"></label>
+    <label>Use<select id="cMode"><option value="auto">Auto: home first, remote when away</option><option value="home">Home only</option><option value="remote">Remote only</option></select></label>
+    <div class="row"><button id="cSave" class="primary grow">Save &amp; reconnect</button><button id="cTest" class="grow">Test both</button></div>
+    <button id="cRepair" class="wide">📷 Re-pair (scan QR)</button>
+  </div>
+  <p id="connNote" class="muted small"></p>
 </section>
 
 <section id="tab-mon" class="page hidden"><div id="monBox"></div><p class="muted small">Updates every 2 s. The laptop appears when its NpuStudio app is open and paired.</p></section>

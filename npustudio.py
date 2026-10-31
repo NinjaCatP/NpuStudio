@@ -282,6 +282,41 @@ def chat_download(progress=None):
     finally: stop[0] = True
     open(os.path.join(CHAT_DIR, "done.txt"), "w").write("ok")
 
+def pair_info():
+    """Desktop address + key for pairing the Android app (the phone always talks to the desktop server)."""
+    import urllib.request, urllib.parse, json
+    srv = os.path.join(APP, "models", "remote_server.json"); cli = os.path.join(APP, "models", "remote.json")
+    if os.path.exists(srv):
+        c = json.load(open(srv)); host, port, key = "127.0.0.1", c.get("port", 47860), c["key"]
+    elif os.path.exists(cli):
+        c = json.load(open(cli)); host, port, key = c["host"], c.get("port", 47860), c["key"]
+    else: raise RuntimeError("This PC isn't the desktop server and isn't linked to one (Settings > Desktop link).")
+    r = urllib.request.Request(f"http://{host}:{port}/api/v1/info", headers={"X-Key": key})
+    try: info = json.load(urllib.request.urlopen(r, timeout=5))
+    except Exception as e: raise RuntimeError(f"Can't reach the desktop server at {host}:{port} ({e}). Start NpuStudio-Server on the desktop.")
+    lan = info.get("lan") or host; ts = info.get("tailscale") or []
+    q = {"host": lan, "port": port, "key": key}
+    if ts: q["remote"] = ts[0]
+    return "npustudio://pair?" + urllib.parse.urlencode(q), lan, ts, port
+
+def open_pair_window(root):
+    import tkinter as tk
+    from tkinter import ttk, messagebox
+    try:
+        uri, lan, ts, port = pair_info()
+        import segno, io
+        from PIL import Image, ImageTk
+        b = io.BytesIO(); segno.make(uri, error="m").save(b, kind="png", scale=7, border=3); b.seek(0)
+        ph = ImageTk.PhotoImage(Image.open(b))
+    except Exception as e:
+        messagebox.showerror("Pair phone", str(e), parent=root); return
+    w = tk.Toplevel(root); w.title("NpuStudio - Pair phone"); w.configure(bg="white")
+    l = tk.Label(w, image=ph, bg="white"); l.image = ph; l.pack(padx=12, pady=(12, 4))
+    txt = f"Home: {lan}:{port}" + (f"\nTailscale: {ts[0]}:{port} (switches automatically when away)" if ts else "\nTailscale: not detected on the desktop (home Wi-Fi only)")
+    tk.Label(w, text="In the NpuStudio phone app tap Scan QR (or Connection > Re-pair).\n" + txt, bg="white", fg="#111", justify="center").pack(padx=12)
+    tk.Label(w, text="This code contains the pairing key - don't share it.", bg="white", fg="#b00").pack(pady=(4, 6))
+    ttk.Button(w, text="Close", command=w.destroy).pack(pady=(0, 12))
+
 class ChatEngine:
     def __init__(self, status=None):
         import openvino as ov, openvino_genai as og
@@ -305,13 +340,21 @@ class ChatEngine:
         try: self.pipe.finish_chat()
         except Exception: pass
         import actions
-        self.pipe.start_chat(actions.TOOLS_PROMPT)
+        self.target = getattr(self, "want_target", "pc")
+        self.pipe.start_chat(actions.PHONE_PROMPT if self.target == "phone" else actions.TOOLS_PROMPT)
 
-    def handle(self, q, on_text, confirm=None, timer_cb=None, on_action=None):
-        """Router first, then the model. Returns (source, action, result, tokens, seconds)."""
+    def handle(self, q, on_text, confirm=None, timer_cb=None, on_action=None, target="pc"):
+        """Router first, then the model. Returns (source, action, result, tokens, seconds).
+        target="phone": actions are NOT run here; the result is ("phone", action) for the phone app to run."""
         import actions
-        a = actions.route(q)
+        phone = target == "phone"
+        if getattr(self, "target", "pc") != target:   # switch the system prompt (new conversation for the other device)
+            self.want_target = target; self.new_chat()
+        run = (lambda a: ("phone", a)) if phone else (lambda a: actions.execute(a, confirm, timer_cb))
+        a = actions.route_phone(q) if phone else actions.route(q)
         if a:
+            if on_action: on_action(a)
+            return "router", a, run(a), 0, 0.0
             if on_action: on_action(a)
             return "router", a, actions.execute(a, confirm, timer_cb), 0, 0.0
         buf = []; state = {"mode": None}
@@ -326,10 +369,10 @@ class ChatEngine:
             elif state["mode"] == "text": on_text(sub)
         n, dt = self.ask(q, tok)
         full = "".join(buf)
-        a = actions.parse_action(full)
+        a = actions.parse_action(full, actions.PHONE if phone else None)
         if a and state["mode"] != "text":  # only act when the reply *is* an action, not an answer that rambles into one
             if on_action: on_action(a)
-            return "model", a, actions.execute(a, confirm, timer_cb), n, dt
+            return "model", a, run(a), n, dt
         if state["mode"] != "text":
             on_text(full if not full.lstrip().startswith(("ACTION", "{")) else "Sorry, I'm not sure how to do that. Try wording it like \"open notepad\" or \"volume to 30\".")
         return "model", None, None, n, dt
@@ -728,6 +771,7 @@ def gui():
     except Exception: logging.exception("edit tab")
     ttk.Button(bar, text="Send to Edit", command=lambda: (st["out"] or st["img"]) is not None and to_edit(st["out"] or st["img"])).pack(side="left", padx=4)
     ttk.Button(topbar, text="Chip Monitor", command=open_monitor).pack(side="right")
+    ttk.Button(topbar, text="Pair phone", command=lambda: open_pair_window(root)).pack(side="right", padx=4)
     import devices
     devv = tk.StringVar(value=devices.get_raw())
     deskv = tk.StringVar(value="")

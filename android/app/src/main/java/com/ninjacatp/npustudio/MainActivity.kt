@@ -74,10 +74,21 @@ class MainActivity : AppCompatActivity() {
         if (pairing == null) pairLauncher.launch(Intent(this, PairActivity::class.java)) else load()
     }
 
+    @Volatile private var choosing = false
+    /** Picks the first reachable address (auto: home first, then Tailscale) and loads the UI from it. */
     private fun load() {
         val p = pairing ?: return
+        if (choosing) return; choosing = true
         offline.visibility = View.GONE; web.visibility = View.VISIBLE
-        web.loadUrl("${p.base}/app/#k=" + Uri.encode(p.key))
+        thread {
+            val pick = p.order().firstOrNull { (HostRules.probe(it, p.port, p.key, 1500) ?: -1) >= 0 }
+            runOnUiThread {
+                choosing = false
+                if (pick == null) { pairing = p.copy(host = p.order().firstOrNull() ?: p.host); showOffline("None of the saved addresses answered (${p.order().joinToString()})."); return@runOnUiThread }
+                pairing = p.copy(host = pick)
+                web.loadUrl("${pairing!!.base}/app/#k=" + Uri.encode(p.key))
+            }
+        }
     }
 
     private fun showOffline(why: String) {
@@ -103,6 +114,7 @@ class MainActivity : AppCompatActivity() {
     private inner class Client : WebViewClient() {
         private fun ours(u: Uri) = pairing?.let { u.host == it.host && (u.port == it.port || u.port == -1 && it.port == 80) } ?: false
         override fun shouldOverrideUrlLoading(v: WebView, r: WebResourceRequest): Boolean {
+            if (ours(r.url) && r.url.path?.endsWith(".apk") == true) { startActivity(Intent(Intent.ACTION_VIEW, r.url)); return true }   // app update: let the browser download it
             if (ours(r.url)) return false
             if (r.url.scheme == "https") startActivity(Intent(Intent.ACTION_VIEW, r.url))   // open outside links in the browser
             return true
@@ -116,7 +128,7 @@ class MainActivity : AppCompatActivity() {
             return null
         }
         override fun onReceivedError(v: WebView, r: WebResourceRequest, e: WebResourceError) {
-            if (r.isForMainFrame) showOffline(e.description.toString())
+            if (r.isForMainFrame) { if ((pairing?.order()?.size ?: 0) > 1 && !choosing) load() else showOffline(e.description.toString()) }
         }
         override fun onReceivedHttpError(v: WebView, r: WebResourceRequest, e: WebResourceResponse) {
             if (r.isForMainFrame) showOffline("The desktop answered HTTP ${e.statusCode}.")
@@ -140,6 +152,42 @@ class MainActivity : AppCompatActivity() {
             runOnUiThread { startActivity(Intent.createChooser(i, "Share picture")) }
         } }
         @JavascriptInterface fun notify(title: String, text: String) = notifyUser(title, text)
+        /** v2: allowlisted phone action from the chat; result text comes back via npuCallback. */
+        @JavascriptInterface fun phoneAction(json: String, cbId: String) {
+            val id = cbId.filter { it.isLetterOrDigit() }
+            runOnUiThread {
+                val r = PhoneActions.run(this@MainActivity, json) { t, x -> notifyUser(t, x) }
+                js("window.npuCallback('$id', " + org.json.JSONObject.quote(r) + ")")
+            }
+        }
+        @JavascriptInterface fun getConnection(): String {
+            val p = pairing ?: return "{}"
+            return org.json.JSONObject().put("home", p.home ?: "").put("remote", p.remote ?: "").put("port", p.port)
+                .put("mode", p.mode).put("active", p.host).put("activeKind", if (HostRules.isRemote(p.host)) "remote" else "home").toString()
+        }
+        /** Returns "" on success (then reloads), or an error message for the page to show. */
+        @JavascriptInterface fun setConnection(home: String, remote: String, mode: String): String {
+            val p = pairing ?: return "Not paired."
+            fun host(s: String) = HostRules.parseAddress(s)?.first
+            val h = host(home); val r = host(remote)
+            if (h == null && r == null) return "Enter at least one address."
+            listOfNotNull(h, r).firstOrNull { !HostRules.allowed(it) }?.let { return "$it isn't a home-network or Tailscale address." }
+            val np = p.copy(home = h, remote = r, mode = if (mode in listOf("auto", "home", "remote")) mode else "auto")
+            HostRules.save(this@MainActivity, np); pairing = np; runOnUiThread { load() }; return ""
+        }
+        @JavascriptInterface fun probe(cbId: String) {
+            val p = pairing ?: return; val id = cbId.filter { it.isLetterOrDigit() }
+            thread {
+                val o = org.json.JSONObject()
+                p.home?.let { o.put("Home $it", HostRules.probe(it, p.port, p.key) ?: org.json.JSONObject.NULL) }
+                p.remote?.let { o.put("Remote $it", HostRules.probe(it, p.port, p.key) ?: org.json.JSONObject.NULL) }
+                val s = o.toString().replace("\\", "\\\\").replace("'", "\\'")
+                runOnUiThread { js("window.npuCallback('$id', '$s')") }
+            }
+        }
+        /** Page lost the desktop: switch to the other saved address if it answers. */
+        @JavascriptInterface fun fallback() = runOnUiThread { if ((pairing?.order()?.size ?: 0) > 1) load() }
+        @JavascriptInterface fun rePair() = runOnUiThread { pairLauncher.launch(Intent(this@MainActivity, PairActivity::class.java).putExtra("scan", true)) }
         @JavascriptInterface fun unpair() = runOnUiThread { HostRules.clear(this@MainActivity); pairing = null; pairLauncher.launch(Intent(this@MainActivity, PairActivity::class.java)) }
     }
 

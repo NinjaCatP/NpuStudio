@@ -111,3 +111,11 @@ The NpuStudio laptop app uses a compact binary form of the same jobs: `POST /job
   - `unpair()` forgets the pairing and shows the pairing screen.
 - **In a normal browser:** the same page works without the bridge. It falls back to a file input, a download link, the Web Share API and web notifications.
 - **Android source and build:** see `android/README.md`. For use away from home, see `TAILSCALE.md`.
+
+## v1.2 additions
+- `POST /api/v1/upscale/check` `{width, height, scale}` → `{out_width, out_height, megapixels, memory_gb, memory_limit_gb, max_side, max_megapixels, ok, reason, fit_width, fit_height}`. Scale 2/4/8/16 (16 = two 4x passes). Limits: 18 GB budget, 16384 px side, 160 MP.
+- `GET /api/v1/options` → scales, models, devices, memory limit, gen sizes (same as the PC app), AI Change methods.
+- `upscale` job: `scale` up to 16, `device` (Auto/NVIDIA/Intel Arc/CPU/All), `format` AUTO|PNG|JPEG (AUTO = PNG up to 24 MP). Too-big requests fail with a suggested shrink size.
+- `gen` job: `upscaler` sharp|fast. `change` job: `method`, `strength`, `grow` (-30..40 px), `whole`.
+- `chat` job: `device` = `pc` (default; allowlisted actions run on the desktop, CONFIRM ones wait for `/confirm`) or `phone` (nothing runs on the PC; the result has `phone_action {name, args}`, `needs_confirm`, `confirm_text` and the web UI runs it through `NpuShell.phoneAction`).
+- `/pair` (desktop only) also shows a combined Home + Tailscale QR when Tailscale is up.

@@ -46,11 +46,30 @@ def lan_ip():
 
 # ---------------- jobs ----------------
 _up = {}; _up_lock = threading.Lock(); _ai = None; _ai_lock = threading.Lock(); JOBS = {}; _busy = [0]
-def upscaler(name):
+def upscaler(name, pref=None):
     import npustudio
+    pref = None if pref in (None, "", "Auto") else pref
     with _up_lock:
-        if name not in _up: _up[name] = npustudio.Upscaler(name)
-        return _up[name]
+        if (name, pref) not in _up: _up[(name, pref)] = npustudio.Upscaler(name, pref)
+        return _up[(name, pref)]
+
+# Phone/API limits for an upscale result (the laptop app's 18 GB memory budget applies too)
+API_MAX_SIDE = 16384          # WebViews / most image viewers can't decode a bigger side
+API_MAX_MP = 160              # ~160 MP: still a sane download over Wi-Fi as JPEG
+UP_DEVICES = ["Auto", "NVIDIA", "Intel Arc", "CPU", "All"]
+def upscale_check(w, h, scale):
+    import npustudio
+    ow, oh = w * scale, h * scale; need = npustudio.need_bytes(w, h, scale)
+    r = {"width": w, "height": h, "scale": scale, "out_width": ow, "out_height": oh, "megapixels": round(ow * oh / 1e6, 1),
+         "memory_gb": round(need / 2**30, 2), "memory_limit_gb": npustudio.MAX_BYTES / 2**30,
+         "max_side": API_MAX_SIDE, "max_megapixels": API_MAX_MP, "ok": True, "reason": ""}
+    if scale not in (2, 4, 8, 16): r.update(ok=False, reason="scale must be 2, 4, 8 or 16")
+    elif need > npustudio.MAX_BYTES: r.update(ok=False, reason=f"needs about {need/2**30:.1f} GB, over the {npustudio.MAX_BYTES/2**30:.0f} GB limit")
+    elif max(ow, oh) > API_MAX_SIDE or ow * oh > API_MAX_MP * 1e6:
+        r.update(ok=False, reason=f"result {ow}x{oh} is too big to send to a phone (max {API_MAX_SIDE}px side, {API_MAX_MP} MP)")
+    f = min(1.0, API_MAX_SIDE / max(ow, oh), (API_MAX_MP * 1e6 / (ow * oh)) ** 0.5)   # input size that would fit
+    r["fit_width"], r["fit_height"] = max(1, int(w * f)), max(1, int(h * f))
+    return r
 def ai():
     global _ai
     with _ai_lock:
@@ -139,14 +158,16 @@ def pair_page(h):
         return h._send(403, {"error": "open the pairing page on the desktop itself: http://127.0.0.1:%s/pair" % config()["port"]})
     import html, urllib.parse
     c = config(); hosts = [lan_ip()] + tailscale_ips(); port = c["port"]
-    cards = []
-    for host in hosts:
-        uri = "npustudio://pair?" + urllib.parse.urlencode({"host": host, "port": port, "key": c["key"]})
+    cards = []; ts = tailscale_ips()
+    combos = ([("Home + Tailscale (recommended: switches automatically)", {"host": lan_ip(), "remote": ts[0]})] if ts else []) + \
+             [("Tailscale (anywhere)" if h.startswith("100.") else "Home Wi-Fi / LAN", {"host": h}) for h in hosts]
+    for label, q in combos:
+        host = q["host"] + (" + " + q["remote"] if "remote" in q else "")
+        uri = "npustudio://pair?" + urllib.parse.urlencode({**q, "port": port, "key": c["key"]})
         try:
             import segno; svg = segno.make(uri, error="m").svg_inline(scale=6)
         except Exception as e: svg = "<p>(QR needs the segno package: %s)</p>" % html.escape(str(e))
-        label = "Tailscale (anywhere)" if host.startswith("100.") else "Home Wi-Fi / LAN"
-        cards.append(f"<div class=c><h2>{label}</h2>{svg}<p><b>Address:</b> http://{host}:{port}</p></div>")
+        cards.append(f"<div class=c><h2>{label}</h2>{svg}<p><b>Address:</b> {host} port {port}</p></div>")
     body = f"""<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width"><title>NpuStudio pairing</title>
 <style>body{{font-family:Segoe UI,sans-serif;background:#14161c;color:#e8e8ee;text-align:center}}.c{{display:inline-block;background:#fff;color:#111;border-radius:12px;padding:16px;margin:12px}}code{{background:#222;padding:4px 8px;border-radius:6px}}</style>
 <h1>Pair the NpuStudio Companion app</h1><p>In the phone app, tap <b>Scan QR</b> and point it at one of these codes.</p>{''.join(cards)}
@@ -157,7 +178,7 @@ def pair_page(h):
 # ================= mobile web UI (/app) =================
 WEB = os.path.join(APP, "webapp")
 MIME = {".html": "text/html; charset=utf-8", ".js": "text/javascript", ".css": "text/css", ".json": "application/json",
-        ".png": "image/png", ".svg": "image/svg+xml", ".webmanifest": "application/manifest+json", ".ico": "image/x-icon"}
+        ".png": "image/png", ".svg": "image/svg+xml", ".webmanifest": "application/manifest+json", ".ico": "image/x-icon", ".apk": "application/vnd.android.package-archive"}
 def serve_app(h):
     if not allowed_peer(h.client_address[0]): return h._send(403, {"error": "not allowed"})
     rel = h.path.split("?")[0][len("/app"):].lstrip("/") or "index.html"
@@ -195,29 +216,49 @@ def api_job(kind, a, j):
         import imagegen, cudaeng
         tw, th = int(a.get("width", 768)), int(a.get("height", 768)); (w, h), up = imagegen.plan_for(tw, th)
         im = cudaeng.gen(a["prompt"], w, h, int(a.get("steps", 4)), int(a.get("seed", 42)), prog, stat)
-        if up > 1: stat("upscaling..."); im = upscaler("Sharp (Real-ESRGAN x4plus)").upscale_to(im, up, prog)
+        upn = "Fast (Intel SR-1032)" if str(a.get("upscaler", "sharp")).lower() == "fast" else "Sharp (Real-ESRGAN x4plus)"
+        if up > 1: stat(f"upscaling {up}x ({upn.split(' (')[0]})..."); im = upscaler(upn).upscale_to(im, up, prog)
         return {"image": imgb64(imagegen.fit_crop(im, tw, th)), "device": "NVIDIA"}
     if kind == "upscale":
         name = "Sharp (Real-ESRGAN x4plus)" if a.get("model", "sharp") == "sharp" else "Fast (Intel SR-1032)"
-        u = upscaler(name); im = u.upscale_to(b64img(a["image"]).convert("RGB"), int(a.get("scale", 4)), prog)
-        return {"image": imgb64(im, a.get("format", "PNG")), "device": u.device}
+        src = b64img(a["image"]).convert("RGB"); sc = int(a.get("scale", 4)); chk = upscale_check(*src.size, sc)
+        if not chk["ok"]: raise ValueError(f"Upscale {sc}x of {src.size[0]}x{src.size[1]}: {chk['reason']}. "
+                                           f"Shrink the picture to {chk['fit_width']}x{chk['fit_height']} or pick a smaller scale.")
+        dev = a.get("device") or "Auto"
+        if dev not in UP_DEVICES: raise ValueError("device must be one of " + ", ".join(UP_DEVICES))
+        u = upscaler(name, dev); stat(f"Upscaling {sc}x on {u.device}" + (" (2 passes)" if sc >= 8 else "") + "...")
+        im = u.upscale_to(src, sc, prog); del src
+        fmt = a.get("format", "AUTO").upper()
+        if fmt == "AUTO": fmt = "PNG" if im.size[0] * im.size[1] <= 24e6 else "JPEG"     # big PNGs are huge to send
+        stat("encoding result..."); return {"image": imgb64(im, fmt), "format": fmt, "width": im.size[0], "height": im.size[1], "device": u.device}
     if kind in ("remove_bg", "erase"):
         im = b64img(a["image"])
-        r, d = ai().remove_bg(im, stat) if kind == "remove_bg" else ai().erase(im, b64img(a["mask"]).convert("L"), stat)
+        r, d = ai().remove_bg(im, stat) if kind == "remove_bg" else ai().erase(im, b64img(a["mask"]).convert("L").resize(im.size), stat)
         return {"image": imgb64(r), "device": str(d)}
     if kind == "change":     # AI Change: free-text instruction, optional mask (white = area to change)
         import aichange
         if _chg["c"] is None: _chg["c"] = aichange.Changer()
         c = _chg["c"]; im = b64img(a["image"]).convert("RGB"); instr = a["instruction"]
         stat("analyzing picture..."); ana = c.analyze(im, stat)
-        mask = b64img(a["mask"]).convert("L") if a.get("mask") else None
+        mask = b64img(a["mask"]).convert("L").resize(im.size) if a.get("mask") else None
         if mask is None:
             try:
                 tgt = aichange.parse(instr); mask = aichange.Seg().mask(im, aichange.targets_for(tgt[0] if isinstance(tgt, tuple) else tgt, ana)) if tgt else None
             except Exception: logging.exception("api auto-mask"); mask = None
+        grow = max(-30, min(40, int(a.get("grow", 8))))
+        if mask is not None and grow:
+            from PIL import ImageFilter
+            k = abs(grow) * 2 + 1; mask = mask.filter(ImageFilter.MaxFilter(k) if grow > 0 else ImageFilter.MinFilter(k))
+        method = a.get("method", "Auto")
+        if method not in ("Auto", "Redraw", "Recolor"): raise ValueError("method must be Auto, Redraw or Recolor")
         if mask is not None and mask.getbbox():
-            r = c.edit_masked(ai(), im, mask, instr, ana, progress=prog, status=stat, method=a.get("method", "Auto"))
-        else: r = c.edit_whole(im, instr, ana, progress=prog, status=stat)
+            st_ = float(a.get("strength", 1.0)); stat("changing the masked area...")
+            r = c.edit_masked(ai(), im, mask, instr, ana, strength=max(0.5, min(1.0, st_)), progress=prog, status=stat, method=method)
+        else:
+            if not aichange.is_global(instr) and not a.get("whole"):
+                raise ValueError("Couldn't find what to change. Name the thing (e.g. 'change outfit to a red dress'), paint it with the brush, "
+                                 "or tick 'Whole picture' for a whole-picture change. Nothing was changed.")
+            st_ = float(a.get("strength", 0.4)); r = c.edit_whole(im, instr, ana, strength=max(0.2, min(0.6, st_)), progress=prog, status=stat)
         return {"image": imgb64(r[0]), "device": ", ".join(r[1]) if isinstance(r[1], (tuple, list)) else str(r[1]), "method": r[2], "prompt": r[3], "analysis": ana}
     if kind == "chat":       # allowlisted PC actions run on THIS PC; a CONFIRM action waits for POST .../confirm
         eng = chat_engine(stat); out = []
@@ -226,8 +267,14 @@ def api_job(kind, a, j):
             j["confirm"] = q; j["state"] = "confirm"; ev = j["ev"] = threading.Event()
             ok = ev.wait(120); j["state"] = "running"; j["confirm"] = None
             return bool(ok and j.get("answer"))
-        src, act, res, n, dt = eng.handle(a["message"], on_text, confirm=confirm)
-        return {"text": j.get("text", ""), "action": str(act) if act else None, "action_result": res, "device": eng.device}
+        target = "phone" if str(a.get("device", "pc")).lower() == "phone" else "pc"
+        src, act, res, n, dt = eng.handle(a["message"], on_text, confirm=confirm, target=target)
+        if target == "phone":   # never run on this PC: hand the allowlisted action back to the phone app
+            import actions
+            pa = act if act and act.get("name") in actions.PHONE else None
+            return {"text": j.get("text", ""), "phone_action": pa, "needs_confirm": bool(pa and pa["name"] in actions.PHONE_CONFIRM),
+                    "confirm_text": actions.describe_phone(pa) if pa else None, "target": "phone", "device": eng.device}
+        return {"text": j.get("text", ""), "action": str(act) if act else None, "action_result": res, "target": "pc", "device": eng.device}
     raise ValueError("unknown job type " + kind)
 
 REPORTS = {}
@@ -249,6 +296,11 @@ def api_get(h, p):
         return h._send(200, {"name": socket.gethostname(), "port": c["port"], "lan": lan_ip(), "tailscale": tailscale_ips(),
                              "ui": v, "busy": _busy[0], "jobs": [{"id": k, "type": x.get("type"), "state": x["state"]} for k, x in JOBS.items() if x.get("type")]})
     if p == ["monitor"]: return h._send(200, monitor())
+    if p == ["options"]:     # what the phone UI should offer (mirrors the laptop app)
+        import npustudio, imagegen
+        return h._send(200, {"upscale_scales": [2, 4, 8, 16], "upscale_models": [{"id": "sharp", "name": "Sharp (Real-ESRGAN x4plus)"}, {"id": "fast", "name": "Fast (Intel SR-1032)"}],
+                             "upscale_devices": UP_DEVICES, "memory_limit_gb": npustudio.MAX_BYTES / 2**30, "max_side": API_MAX_SIDE, "max_megapixels": API_MAX_MP,
+                             "gen_sizes": [p.split(" ")[0] for p in imagegen.PRESETS if "x" in p], "change_methods": ["Auto", "Redraw", "Recolor"]})
     if len(p) >= 2 and p[0] == "jobs":
         j = JOBS.get(p[1])
         if not j: return h._send(404, {"error": "no such job"})
@@ -273,6 +325,9 @@ def api_post(h, p, data):
         j["cancel"] = True
         if j["state"] == "confirm": j["answer"] = False; j["ev"].set()
         return h._send(200, {"ok": True})
+    if p == ["upscale", "check"]:
+        try: return h._send(200, upscale_check(int(a["width"]), int(a["height"]), int(a["scale"])))
+        except Exception as e: return h._send(400, {"error": str(e)})
     if p == ["report"]:      # the laptop app pushes its Chip Monitor numbers here so the phone can show them
         a["_t"] = time.time(); REPORTS[str(a.get("name", "laptop"))[:40]] = a; return h._send(200, {"ok": True})
     if len(p) == 3 and p[0] == "jobs" and p[2] == "confirm":

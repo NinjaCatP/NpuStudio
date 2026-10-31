@@ -208,3 +208,16 @@ ANDROID COMPANION APP (NpuStudio-Companion.apk)
 - Only connects to home-network and Tailscale addresses. For use away from home, see TAILSCALE.md and AllowTailscale-Firewall.ps1.
 - The laptop app sends its chip stats to the desktop every 3 s while paired, so the phone can show them.
 - Models stay on each machine; only pictures and settings travel over the network.
+- Upscale on the phone: 2x / 4x / 8x / 16x (16x = two 4x passes), Sharp or Fast model, desktop chip choice (Auto / NVIDIA / Intel Arc / CPU / All), PNG or JPEG. Before running, the app checks the result size (18 GB memory budget, max 16384 px side / 160 MP for a phone) and offers to shrink the picture to fit.
+- Gen on the phone: phone sizes plus the same sizes as the PC app, 4K and Custom; Upscale-with model, Steps, Seed.
+- Edit on the phone: rotate/flip/crop/resize, brightness/contrast/saturation and filters, undo/redo, brush mask, AI erase, Remove background, AI Change with Method, Whole picture, Strength and Grow.
+- Connection screen (tap the status pill): shows Home or Remote, online status and latency; saves a home address and a Tailscale address and switches between them automatically; Re-pair by scanning a QR.
+- Chat controls the device you're chatting from. On the phone ("Control: This phone"): open apps, flashlight on/off, media volume up/down/set and mute, alarms and timers, open links (asks first), web search, battery level, copy to clipboard, notifications, save/share the last picture. Choose "Desktop PC" to control the desktop instead.
+- The app tells you when a newer Android app is available and links to the APK (also in H:\downloads on the desktop). Installing it over the old one keeps your pairing.
+
+PC CHAT ACTIONS (desktop and laptop app; each PC controls itself)
+- Open/close apps (close asks first), open websites, web search, open folders (Downloads, Documents... or a full folder path), Windows settings pages.
+- Volume set/up/down, mute/unmute, brightness, dark/light mode, media play/pause, next, previous, stop.
+- Screenshot, timer/reminder, battery, time/date, lock, sleep/restart/shut down (ask first).
+- Search files by name in your user folders, read or set the clipboard, system info (CPU, GPU, RAM, disk, uptime), list open apps.
+- "Pair phone" button (top bar) shows the phone pairing QR, including the Tailscale address when the desktop has one.

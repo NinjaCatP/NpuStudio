@@ -15,8 +15,8 @@ SETTINGS = {"wifi": "network-wifi", "wi-fi": "network-wifi", "network": "network
 FOLDERS = {"downloads": "Downloads", "documents": "Documents", "pictures": "Pictures", "desktop": "Desktop",
            "music": "Music", "videos": "Videos"}
 
-TOOLS_PROMPT = """You are a helpful, concise assistant running on the user's Windows laptop.
-You can also control the laptop. When the user asks you to DO something, reply with exactly one line:
+TOOLS_PROMPT = """You are a helpful, concise assistant running on the user's Windows PC.
+You can also control THIS PC (the one the user is chatting from). When the user asks you to DO something, reply with exactly one line:
 ACTION: {"name": "<name>", "args": {...}}
 Available actions:
 open_app {"app": name} | close_app {"app": name} | open_url {"url": url} | web_search {"query": text}
@@ -24,6 +24,8 @@ open_folder {"folder": downloads|documents|pictures|desktop|music|videos} | sett
 volume {"level": 0-100} | brightness_change {"delta": -100..100} | volume_change {"delta": -100..100} | mute {} | unmute {}
 brightness {"level": 0-100} | dark_mode {"on": true|false} | screenshot {} | timer {"minutes": n, "message": text}
 battery {} | time {} | lock {} | sleep {} | restart {} | shutdown {}
+media {"key": play_pause|next|previous|stop} | search_files {"query": name} | clipboard_get {} | clipboard_set {"text": text}
+system_info {} | running_apps {}
 Examples:
 User: pull up the calculator -> ACTION: {"name": "open_app", "args": {"app": "calculator"}}
 User: make the screen dimmer -> ACTION: {"name": "brightness_change", "args": {"delta": -15}}
@@ -157,6 +159,8 @@ def route(text):
     t = text.lower().strip().rstrip(".!?")
     t = re.sub(r"^(please |can you |could you |hey |would you )+", "", t)
     t = re.sub(r"\s+(please|for me|now)$", "", t)
+    r = _route_more(t)
+    if r: return r
     m = re.search(r"(?:volume|sound)\s*(?:to|at|=)?\s*" + NUM, t) or re.search(r"set (?:the )?(?:volume|sound)(?: level)? to " + NUM, t)
     if m: return {"name": "volume", "args": {"level": int(m.group(1))}}
     if re.search(r"\b(turn|volume|sound)\b.*\b(up|louder)\b|\blouder\b", t): return {"name": "volume_change", "args": {"delta": 10}}
@@ -206,7 +210,29 @@ def route(text):
     if m: return {"name": "open_app", "args": {"app": m.group(1)}}
     return None
 
-def parse_action(text):
+def _route_more(t):
+    if re.fullmatch(r"(play|pause|resume|play/pause|play pause|toggle play(back)?|pause (the )?(music|song|video|media)|play (the )?(music|song|media)|resume (the )?(music|song|media))", t):
+        return {"name": "media", "args": {"key": "play_pause"}}
+    if re.fullmatch(r"(next|skip)( (the )?(song|track|video))?|next song|skip (this )?(song|track)", t): return {"name": "media", "args": {"key": "next"}}
+    if re.fullmatch(r"(previous|prev|last|go back)( (the )?(song|track|video))?|previous song", t): return {"name": "media", "args": {"key": "previous"}}
+    if re.fullmatch(r"stop (the )?(music|song|playback|media)", t): return {"name": "media", "args": {"key": "stop"}}
+    m = re.match(r"(?:find|search(?: for)?|locate|where is|where's) (?:the |my )?(?:file|files|document|folder)s?(?: named| called)? (.+?)(?: on (?:my|the) (?:pc|computer|laptop))?$", t)
+    if m: return {"name": "search_files", "args": {"query": m.group(1)}}
+    if re.search(r"\b(what('s| is) (on|in) (my |the )?clipboard|read (my |the )?clipboard|clipboard contents?|paste (my |the )?clipboard)\b", t): return {"name": "clipboard_get", "args": {}}
+    m = re.match(r"copy (.+?) to (?:my |the )?clipboard$", t)
+    if m: return {"name": "clipboard_set", "args": {"text": m.group(1).strip("\"' ")}}
+    if re.search(r"\b(system info|system information|pc specs|computer specs|specs of (this|my) (pc|computer|laptop)|how much (ram|memory)|(cpu|gpu|ram) (usage|info)|uptime|disk space|free space)\b", t):
+        return {"name": "system_info", "args": {}}
+    if re.search(r"\b(what('s| is| are)? (apps |programs )?(are )?(running|open)|running (apps|programs)|open (apps|windows|programs)|list (the )?(running |open )?(apps|programs|windows))\b", t):
+        return {"name": "running_apps", "args": {}}
+    return None
+
+def parse_action(text, names=None):
+    if names is not None:     # phone actions: same parser, other name list
+        global ALL
+        saved = ALL; ALL = {n: None for n in names}
+        try: return parse_action(text)
+        finally: ALL = saved
     m = re.search(r"ACTION:\s*(\{.*\})", text, re.S)
     if not m:
         t = text.strip()
@@ -243,7 +269,7 @@ def parse_action(text):
 def describe(a):
     n, g = a["name"], a.get("args", {})
     return {"close_app": f"close {g.get('app', '?')}", "sleep": "put the PC to sleep", "restart": "restart the PC",
-            "shutdown": "shut down the PC"}.get(n, n)
+            "shutdown": "shut down the PC", "open_url": f"open {g.get('url', '?')}"}.get(n, n)
 
 def execute(a, confirm=None, timer_cb=None):
     """Run an allowlisted action. confirm(msg)->bool is required for CONFIRM actions. Returns a short result string."""
@@ -279,7 +305,9 @@ def _search(g, _):
     webbrowser.open("https://www.bing.com/search?q=" + urllib.parse.quote_plus(q)); return f"Searched the web for '{q}'."
 
 def _folder(g, _):
-    p = folder_path(str(g.get("folder", "downloads")))
+    f = str(g.get("folder", "downloads")).strip().strip('"')
+    if os.path.isabs(f) and os.path.isdir(f): os.startfile(f); return f"Opened {f}."
+    p = folder_path(f)
     os.startfile(p); return f"Opened {p}."
 
 def _settings(g, _):
@@ -322,7 +350,101 @@ def _sleep(g, _): ctypes.windll.powrprof.SetSuspendState(0, 0, 0); return "Going
 def _restart(g, _): subprocess.Popen(["shutdown", "/r", "/t", "5"], creationflags=NOWIN); return "Restarting in 5 seconds."
 def _shutdown(g, _): subprocess.Popen(["shutdown", "/s", "/t", "5"], creationflags=NOWIN); return "Shutting down in 5 seconds."
 
+VK = {"play_pause": 0xB3, "next": 0xB0, "previous": 0xB1, "stop": 0xB2}
+def _media(g, _):
+    k = str(g.get("key", "play_pause")).lower().replace("/", "_").replace(" ", "_")
+    k = {"play": "play_pause", "pause": "play_pause", "prev": "previous", "skip": "next"}.get(k, k)
+    if k not in VK: return "I can play/pause, skip to the next or previous track, or stop."
+    u = ctypes.windll.user32; u.keybd_event(VK[k], 0, 0, 0); u.keybd_event(VK[k], 0, 2, 0)
+    return {"play_pause": "Toggled play/pause.", "next": "Skipped to the next track.", "previous": "Went to the previous track.", "stop": "Stopped playback."}[k]
+
+def _search_files(g, _):
+    q = str(g.get("query", "")).strip().lower()
+    if len(q) < 2: return "Tell me part of the file name to look for."
+    home = os.path.expanduser("~"); roots = [folder_path(f) for f in FOLDERS] + [home]
+    hits, seen, t0 = [], set(), time.time()
+    for root in roots:
+        for dp, dns, fns in os.walk(root):
+            dns[:] = [d for d in dns if not d.startswith(".") and d.lower() not in ("appdata", "node_modules", "venv", "__pycache__")]
+            if dp in seen: dns[:] = []; continue
+            seen.add(dp)
+            for f in fns + dns:
+                if q in f.lower(): hits.append(os.path.join(dp, f))
+            if len(hits) >= 15 or time.time() - t0 > 8: break
+        if len(hits) >= 15 or time.time() - t0 > 8: break
+    if not hits: return f"No files named like '{q}' in your user folders."
+    return f"Found {len(hits)}{'+' if len(hits) >= 15 else ''}:\n" + "\n".join(hits[:15])
+
+def _clip_get(g, _):
+    r = subprocess.run(["powershell", "-NoProfile", "-Command", "Get-Clipboard -Raw"], capture_output=True, text=True, creationflags=NOWIN, timeout=10)
+    t = (r.stdout or "").strip()
+    return ("Clipboard: " + (t[:1500] + ("..." if len(t) > 1500 else ""))) if t else "The clipboard is empty (or holds a picture)."
+def _clip_set(g, _):
+    t = str(g.get("text", ""))[:20000]
+    subprocess.run(["powershell", "-NoProfile", "-Command", "$input | Set-Clipboard"], input=t, text=True, creationflags=NOWIN, timeout=10)
+    return "Copied to the clipboard."
+
+def _sysinfo(g, _):
+    import platform, shutil
+    class MS(ctypes.Structure):
+        _fields_ = [("l", ctypes.c_ulong), ("load", ctypes.c_ulong)] + [(n, ctypes.c_ulonglong) for n in ("tp", "ap", "tf", "af", "tv", "av", "ae")]
+    m = MS(); m.l = ctypes.sizeof(MS); ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(m))
+    up = ctypes.windll.kernel32.GetTickCount64() / 1000
+    cpu = _ps("(Get-CimInstance Win32_Processor).Name").strip()
+    gpus = _ps("(Get-CimInstance Win32_VideoController).Name -join ', '").strip()
+    drive = os.environ.get("SystemDrive", "C:") + "\\"; du = shutil.disk_usage(drive)
+    return (f"{platform.node()}: Windows {platform.version()}\nCPU: {cpu}\nGPU: {gpus}\n"
+            f"RAM: {(m.tp-m.ap)/2**30:.1f} of {m.tp/2**30:.1f} GB used ({m.load}%)\n"
+            f"Disk {drive} {du.free/2**30:.0f} GB free of {du.total/2**30:.0f} GB\nUp for {int(up//86400)}d {int(up%86400//3600)}h {int(up%3600//60)}m")
+
+def _running(g, _):
+    out = _ps("Get-Process | ? { $_.MainWindowTitle } | Sort-Object ProcessName -Unique | % { $_.ProcessName + ' - ' + $_.MainWindowTitle }")
+    lines = [l.strip() for l in out.splitlines() if l.strip()]
+    return ("Open apps:\n" + "\n".join(lines[:40])) if lines else "No app windows are open."
+
 ALL = {"open_app": _open_app, "close_app": _close_app, "open_url": _open_url, "web_search": _search, "open_folder": _folder,
        "settings": _settings, "volume": _volume, "volume_change": _vchange, "mute": _mute, "unmute": _unmute,
        "brightness": _bright, "brightness_change": _bchange, "dark_mode": _dark, "screenshot": _shot, "timer": _timer,
-       "battery": _battery, "time": _time, "lock": _lock, "sleep": _sleep, "restart": _restart, "shutdown": _shutdown}
+       "battery": _battery, "time": _time, "lock": _lock, "sleep": _sleep, "restart": _restart, "shutdown": _shutdown,
+       "media": _media, "search_files": _search_files, "clipboard_get": _clip_get, "clipboard_set": _clip_set,
+       "system_info": _sysinfo, "running_apps": _running}
+
+# ---------------- phone actions (run by the Android app, not here) ----------------
+PHONE = ["open_app", "flashlight", "volume", "volume_change", "mute", "unmute", "alarm", "timer", "open_url", "web_search",
+         "battery", "clipboard_set", "notify", "time", "save_image", "share_image"]
+PHONE_CONFIRM = {"open_url"}
+PHONE_PROMPT = """You are a helpful, concise assistant. The user is chatting from their ANDROID PHONE, and you control the PHONE (not a PC).
+When the user asks you to DO something on the phone, reply with exactly one line:
+ACTION: {"name": "<name>", "args": {...}}
+Available phone actions:
+open_app {"app": name} | flashlight {"on": true|false} | volume {"level": 0-100} | volume_change {"delta": -100..100} | mute {} | unmute {}
+alarm {"hour": 0-23, "minute": 0-59, "message": text} | timer {"minutes": n, "message": text} | open_url {"url": url} | web_search {"query": text}
+battery {} | clipboard_set {"text": text} | notify {"title": text, "text": text} | time {} | save_image {} | share_image {}
+Examples:
+User: turn on the flashlight -> ACTION: {"name": "flashlight", "args": {"on": true}}
+User: wake me up at 6:30 -> ACTION: {"name": "alarm", "args": {"hour": 6, "minute": 30, "message": "Wake up"}}
+User: open spotify -> ACTION: {"name": "open_app", "args": {"app": "spotify"}}
+For normal questions, just answer in plain text without ACTION."""
+
+def route_phone(text):
+    t = text.lower().strip().rstrip(".!?")
+    t = re.sub(r"^(please |can you |could you |hey |would you )+", "", t); t = re.sub(r"\s+(please|for me|now)$", "", t)
+    if re.search(r"\b(flash ?light|torch)\b", t): return {"name": "flashlight", "args": {"on": not re.search(r"\b(off|disable|stop)\b", t)}}
+    m = re.search(r"(?:alarm|wake me(?: up)?)\b.*?\b(\d{1,2})(?::(\d{2}))?\s*(am|pm|a\.m\.|p\.m\.)?", t)
+    if m:
+        h = int(m.group(1)); mi = int(m.group(2) or 0); ap = (m.group(3) or "").replace(".", "")
+        if ap == "pm" and h < 12: h += 12
+        if ap == "am" and h == 12: h = 0
+        return {"name": "alarm", "args": {"hour": h % 24, "minute": mi % 60, "message": "NpuStudio alarm"}}
+    if re.search(r"\b(save|download) (the |this |that )?(last )?(picture|image|photo|result)\b", t): return {"name": "save_image", "args": {}}
+    if re.search(r"\bshare (the |this |that )?(last )?(picture|image|photo|result)\b", t): return {"name": "share_image", "args": {}}
+    m = re.match(r"copy (.+?) to (?:my |the )?clipboard$", t)
+    if m: return {"name": "clipboard_set", "args": {"text": m.group(1).strip("\"' ")}}
+    m = re.match(r"(?:notify me|send (?:me )?a notification|remind me now)(?: that| saying| to)? (.+)$", t)
+    if m: return {"name": "notify", "args": {"title": "NpuStudio", "text": m.group(1)}}
+    a = route(text)        # shared phrasing: volume, mute, timer, battery, time, open url, web search, open app
+    if a and a["name"] in PHONE: return a
+    return None
+
+def describe_phone(a):
+    g = a.get("args", {}); return {"open_url": f"open {g.get('url', '?')} on the phone"}.get(a["name"], a["name"])
