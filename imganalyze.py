@@ -6,13 +6,17 @@ TAG_Q = ("List comma-separated tags for an image-generation prompt describing th
          "any animal or demi-human features (cat ears, fox ears, tail, horns, wings, elf ears) if present; hair colour and style; "
          "eye colour; outfit; pose; background; art style; lighting. Output only the tags, no sentences.")
 NSFW = r"(?i)\b(nude|naked|nsfw|topless|bottomless|nipples?|areola\w*|genitals?|pussy|penis|vagina|sex\w*|erotic|lewd|hentai|ecchi|lingerie|underwear|panties|bra|cleavage|see[- ]?through|transparent clothes|sheer|undress\w*|exposed|bare (breasts?|chest|butt))\b"
-EXAG = r"(?i)\b(busty|voluptuous|curvy|curvaceous|thicc|thick|chubby|plump|skinny|slim|slender|petite|huge|giant|large|big|small|tiny|massive|enormous|wide|narrow|long legs?|hourglass|breasts?|boobs?|bust|butt|ass|hips?|thighs?|waist)\b"
+EXAG = r"(?i)\b(seductive|sexy|sensual|alluring|provocative|busty|voluptuous|curvy|curvaceous|thicc|thick|chubby|plump|skinny|slim|slender|petite|huge|giant|large|big|small|tiny|massive|enormous|wide|narrow|long legs?|hourglass|breasts?|boobs?|bust|butt|ass|hips?|thighs?|waist)\b"
 
 def sanitize(tags):
     import facefix
     out, seen = [], set()
     for t in re.split(r"[,\n;]+", tags or ""):
-        t = re.sub(r"^\s*(\d+[.)]|[-*•]|subject|features?|hair|eyes?|outfit|pose|background|art style|style|lighting)\s*:\s*", "", t.strip(), flags=re.I).strip(" .\"'")
+        t = re.sub(r"^\s*(\d+[.)]|[-*•])\s*", "", t.strip()).strip(" .\"'")
+        m_ = re.match(r"(?i)^(hair|eyes?|eye colou?r|hair colou?r|lighting|background)\s*:\s*(.+)$", t)
+        if m_: k_ = m_.group(1).lower().split()[0]; t = m_.group(2) + " " + {"hair": "hair", "eye": "eyes", "eyes": "eyes", "lighting": "lighting", "background": "background"}.get(k_, "")
+        t = re.sub(r"(?i)^(subject|features?|outfit( details)?|pose|art style|style)\s*:\s*", "", t).strip(" .")
+        if re.fullmatch(r"(?i)(subject|features?|demi-human features|animal features|hair( colou?r)?( and style)?|eyes?( colou?r)?|outfit|pose|background|art style|style|lighting|colou?rs?)", t): continue
         if not t or len(t) > 60 or re.search(NSFW, t) or re.search(EXAG, t) or re.search(facefix.SIZE_WORDS, t): continue
         if re.search(r"(?i)\b(none|not present|no (animal|demi)|n/a)\b", t): continue
         k = t.lower()
@@ -22,7 +26,7 @@ def sanitize(tags):
 def clean_desc(d):
     """Plain description, with nudity terms / body-size wording removed sentence by sentence."""
     s = [x for x in re.split(r"(?<=[.!?])\s+", (d or "").strip()) if x and not re.search(NSFW, x)]
-    return " ".join(re.sub(r"(?i)\b(busty|voluptuous|curvy|curvaceous|thicc)\b\s*", "", x) for x in s)
+    return " ".join(re.sub(r"(?i)\b(seductive|sexy|sensual|provocative|alluring)\b", "relaxed", re.sub(r"(?i)\b(busty|voluptuous|curvy|curvaceous|thicc)\b\s*", "", x)) for x in s)
 
 def analyze(changer, im, device="Auto", status=None):
     t = time.time()
