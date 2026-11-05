@@ -40,4 +40,25 @@ class HeatRankTest {
         )
         assertEquals(listOf("System UI", "Spotify", "Facebook", "NpuStudio", "Maps"), Heat.rank(rows).map { it.label })
     }
+
+    @Test fun hiddenMemoryIsNotReportedAsZero() {
+        assertEquals(12000L, Heat.reportedPssKb(12000L, false))
+        assertNull(Heat.reportedPssKb(0L, false))
+        assertEquals(0L, Heat.reportedPssKb(0L, true))
+        assertNull(Heat.reportedPssKb(-1L, true))
+    }
+
+    @Test fun cpuPercentNeedsASecondSampleInRange() {
+        assertEquals(25.0, Heat.cpuPercentFromMs(0L, 0L, 250L, 1000L)!!, 0.01)
+        assertNull(Heat.cpuPercentFromMs(0L, 0L, 100L, 500L))
+        assertNull(Heat.cpuPercentFromMs(0L, 0L, 1000L, 20L * 60L * 1000L))
+        assertNull(Heat.cpuPercentFromMs(500L, 0L, 100L, 5000L))
+    }
+
+    @Test fun procStatCpuTicksSurviveSpacesInTheProcessName() {
+        assertEquals(30L, Heat.procStatCpuTicks("12 (Chrome App) R 1 1 1 0 -1 4194304 0 0 0 0 10 20 0 0"))
+        assertNull(Heat.procStatCpuTicks("not a stat file"))
+        assertEquals(1000L, Heat.ticksToMs(100L, 100L))
+        assertNull(Heat.ticksToMs(10L, 0L))
+    }
 }

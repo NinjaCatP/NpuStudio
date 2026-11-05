@@ -3,29 +3,39 @@ package com.ninjacatp.npustudio
 import android.app.Activity
 import android.app.ActivityManager
 import android.app.AppOpsManager
+import android.app.usage.NetworkStats
+import android.app.usage.NetworkStatsManager
 import android.app.usage.UsageEvents
 import android.app.usage.UsageStatsManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
+import android.net.ConnectivityManager
 import android.os.Build
 import android.os.Looper
 import android.os.Process
+import android.os.SystemClock
 import android.provider.Settings
+import android.system.Os
+import android.system.OsConstants
 import android.telecom.TelecomManager
 import android.net.Uri
 import android.Manifest
+import java.io.File
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * Heat tab (shell v4). Ranks recent UsageStats / usage events. Android does not
- * expose per-app CPU or battery heat to third-party apps, so this is recent
- * activity only. Stopping another app without root is killBackgroundProcesses
- * when the system allows it, otherwise the system App info page (Force stop).
+ * Heat tab (shell v5). Ranks recent UsageStats / usage events. Android does not
+ * expose a per-app heat sensor. Memory and CPU for other apps are hidden from
+ * normal apps since Android 10 (getProcessMemoryInfo is zeroed; /proc is hidden).
+ * Network bytes for the same user come from NetworkStatsManager when Usage Access
+ * is granted. Missing numbers stay null so the page can show N/A.
+ * Stopping another app without root is killBackgroundProcesses when the system
+ * allows it, otherwise the system App info page (Force stop).
  */
 object Heat {
     private const val WINDOW_MS = 6L * 60L * 60L * 1000L
@@ -138,8 +148,11 @@ object Heat {
                 ))
             }
             rows.sortWith(heatOrder<Row>({ it.inForeground }, { it.lastUsed }, { it.fgServiceStarts }, { it.foregroundMs }, { it.label }))
+            val shown = rows.take(LIMIT)
+            val resources = readResources(c, shown.map { it.pkg }, start, end)
             val arr = JSONArray()
-            for (r in rows.take(LIMIT)) {
+            for (r in shown) {
+                val use = resources.forPackage(r.pkg)
                 arr.put(JSONObject()
                     .put("package", r.pkg)
                     .put("label", r.label)
@@ -148,9 +161,21 @@ object Heat {
                     .put("fg_service_starts", r.fgServiceStarts)
                     .put("in_foreground", r.inForeground)
                     .put("protected", r.protected)
-                    .put("reason", r.reason))
+                    .put("reason", r.reason)
+                    .put("rss_kb", jsonNum(use.rssKb))
+                    .put("pss_kb", jsonNum(use.pssKb))
+                    .put("cpu_pct", if (use.cpuPct == null) JSONObject.NULL else use.cpuPct)
+                    .put("cpu_time_ms", jsonNum(use.cpuTimeMs))
+                    .put("rx_bytes", jsonNum(use.rxBytes))
+                    .put("tx_bytes", jsonNum(use.txBytes))
+                    .put("network_scope", use.networkScope ?: JSONObject.NULL)
+                    .put("wifi_rx_bytes", jsonNum(use.wifiRx))
+                    .put("wifi_tx_bytes", jsonNum(use.wifiTx))
+                    .put("mobile_rx_bytes", jsonNum(use.mobileRx))
+                    .put("mobile_tx_bytes", jsonNum(use.mobileTx))
+                    .put("network_period", use.networkPeriod ?: JSONObject.NULL))
             }
-            JSONObject().put("usage_access", true).put("window_hours", 6).put("apps", arr).toString()
+            JSONObject().put("usage_access", true).put("window_hours", 6).put("resources", true).put("apps", arr).toString()
         }
     } catch (e: Exception) {
         JSONObject().put("usage_access", hasUsage(c)).put("window_hours", 6)
@@ -233,6 +258,209 @@ object Heat {
         .thenByDescending(fgServiceStarts)
         .thenByDescending(foregroundMs)
         .thenBy { label(it).lowercase() }
+
+    private val cpuLock = Any()
+    private val cpuPrev = HashMap<Int, LongArray>() // pid -> [cpuMs, elapsedRealtime]
+
+    /** Android 10+ returns 0 for every other UID. That is "not allowed", not an empty process. */
+    internal fun reportedPssKb(measuredKb: Long, sameUid: Boolean): Long? {
+        if (measuredKb > 0) return measuredKb
+        if (measuredKb == 0L) return if (sameUid) 0L else null
+        return null
+    }
+
+    /** utime+stime from /proc/pid/stat, in clock ticks. comm may contain spaces. */
+    internal fun procStatCpuTicks(text: String): Long? {
+        val rest = text.substringAfterLast(") ", "")
+        if (rest.isEmpty()) return null
+        val parts = rest.split(' ')
+        if (parts.size <= 12) return null
+        val u = parts[11].toLongOrNull() ?: return null
+        val s = parts[12].toLongOrNull() ?: return null
+        if (u < 0 || s < 0) return null
+        return u + s
+    }
+
+    internal fun ticksToMs(ticks: Long, ticksPerSec: Long): Long? {
+        if (ticks < 0 || ticksPerSec <= 0) return null
+        return ticks * 1000L / ticksPerSec
+    }
+
+    /** Percent of one core over a later sample. Null when the gap is too short, too long, or the clock went backwards. */
+    internal fun cpuPercentFromMs(prevCpuMs: Long, prevWallMs: Long, nowCpuMs: Long, nowWallMs: Long): Double? {
+        val dt = nowWallMs - prevWallMs
+        val dc = nowCpuMs - prevCpuMs
+        if (dt !in 1_000L..15L * 60L * 1000L) return null
+        if (dc < 0) return null
+        val pct = dc.toDouble() / dt.toDouble() * 100.0
+        if (pct.isNaN() || pct.isInfinite()) return null
+        return Math.round(pct * 10.0) / 10.0
+    }
+
+    private fun jsonNum(v: Long?) = if (v == null) JSONObject.NULL else v
+
+    private class Use(
+        val rssKb: Long?, val pssKb: Long?, val cpuPct: Double?, val cpuTimeMs: Long?,
+        val rxBytes: Long?, val txBytes: Long?, val networkScope: String?,
+        val wifiRx: Long?, val wifiTx: Long?, val mobileRx: Long?, val mobileTx: Long?, val networkPeriod: String?,
+    )
+
+    private class ResourceBook(val byPkg: Map<String, Use>) {
+        fun forPackage(pkg: String) = byPkg[pkg] ?: Use(null, null, null, null, null, null, null, null, null, null, null, null)
+    }
+
+    /**
+     * Memory and CPU only for processes ActivityManager still lists (on Android 10+ that is
+     * this app's own UID; other PSS values come back as 0 and are reported as unknown).
+     * Network is NetworkStatsManager, queried separately for Wi-Fi and mobile over the same
+     * 6 hour window. Usage Access allows that for apps on this user. TrafficStats cannot split
+     * mobile from Wi-Fi per other UID (since Android 7 it only returns this app, since boot),
+     * so it is not used to fill a missing mobile or Wi-Fi figure.
+     */
+    private fun readResources(c: Context, pkgs: List<String>, start: Long, end: Long): ResourceBook {
+        val am = c.getSystemService(ActivityManager::class.java)
+        val procs = visibleProcs(am, c.packageName)
+        val mem = memoryByPid(am, procs)
+        val cpu = cpuByPid(procs)
+        val net = loadNet(c, start, end)
+        val out = HashMap<String, Use>()
+        for (pkg in pkgs) {
+            val mine = procs.filter { it.matches(pkg) }
+            var rss: Long? = null
+            var pss: Long? = null
+            for (p in mine) {
+                val m = mem[p.pid] ?: continue
+                if (m.rssKb != null) rss = (rss ?: 0L) + m.rssKb
+                if (m.pssKb != null) pss = (pss ?: 0L) + m.pssKb
+            }
+            var cpuPct: Double? = null
+            var cpuTime: Long? = null
+            val samples = mine.mapNotNull { cpu[it.pid] }
+            if (samples.isNotEmpty()) {
+                cpuTime = samples.sumOf { it.timeMs }
+                if (samples.all { it.pct != null }) cpuPct = Math.round(samples.sumOf { it.pct ?: 0.0 } * 10.0) / 10.0
+            }
+            val uid = uidOf(c, pkg)
+            val (wifiRx, wifiTx) = legBytes(net.wifi, uid)
+            val (mobileRx, mobileTx) = legBytes(net.mobile, uid)
+            val period = if (wifiRx != null || mobileRx != null) net.period else null
+            val combined = when {
+                wifiRx != null && mobileRx != null -> Triple(wifiRx + mobileRx, (wifiTx ?: 0L) + (mobileTx ?: 0L), "wifi+mobile")
+                wifiRx != null -> Triple(wifiRx, wifiTx, "wifi")
+                mobileRx != null -> Triple(mobileRx, mobileTx, "mobile")
+                else -> Triple(null, null, null)
+            }
+            out[pkg] = Use(rss, pss, cpuPct, cpuTime, combined.first, combined.second, combined.third, wifiRx, wifiTx, mobileRx, mobileTx, period)
+        }
+        return ResourceBook(out)
+    }
+
+    private class Proc(val pid: Int, val uid: Int, val pkgs: Set<String>, val name: String) {
+        fun matches(pkg: String) = pkg in pkgs || name == pkg || name.startsWith("$pkg:")
+    }
+
+    private fun visibleProcs(am: ActivityManager?, selfPkg: String): List<Proc> {
+        val list = try { am?.runningAppProcesses } catch (_: Exception) { null } ?: emptyList()
+        val procs = list.mapNotNull { info ->
+            if (info == null || info.pid <= 0) null
+            else Proc(info.pid, info.uid, info.pkgList?.toSet() ?: emptySet(), info.processName ?: "")
+        }
+        if (procs.any { it.pid == Process.myPid() }) return procs
+        return procs + Proc(Process.myPid(), Process.myUid(), setOf(selfPkg), selfPkg)
+    }
+
+    private class Mem(val rssKb: Long?, val pssKb: Long?)
+
+    private fun memoryByPid(am: ActivityManager?, procs: List<Proc>): Map<Int, Mem> {
+        if (am == null || procs.isEmpty()) return emptyMap()
+        val infos = try { am.getProcessMemoryInfo(procs.map { it.pid }.toIntArray()) } catch (_: Exception) { null } ?: return emptyMap()
+        val out = HashMap<Int, Mem>()
+        for (i in procs.indices) {
+            val info = infos.getOrNull(i) ?: continue
+            val same = procs[i].uid == Process.myUid()
+            val rss = info.getMemoryStat("summary.total-rss")?.toLongOrNull()?.let { reportedPssKb(it, same) }
+            val pss = reportedPssKb(info.totalPss.toLong(), same)
+            out[procs[i].pid] = Mem(rss, pss)
+        }
+        return out
+    }
+
+    private class Cpu(val timeMs: Long, val pct: Double?)
+
+    private fun cpuByPid(procs: List<Proc>): Map<Int, Cpu> {
+        val wall = SystemClock.elapsedRealtime()
+        val out = HashMap<Int, Cpu>()
+        synchronized(cpuLock) {
+            if (cpuPrev.size > 100) cpuPrev.clear()
+            for (p in procs) {
+                val ms = readCpuMs(p.pid) ?: continue
+                val prev = cpuPrev[p.pid]
+                val pct = if (prev != null) cpuPercentFromMs(prev[0], prev[1], ms, wall) else null
+                cpuPrev[p.pid] = longArrayOf(ms, wall)
+                out[p.pid] = Cpu(ms, pct)
+            }
+        }
+        return out
+    }
+
+    private fun readCpuMs(pid: Int): Long? {
+        if (pid == Process.myPid()) {
+            val ms = Process.getElapsedCpuTime()
+            return if (ms >= 0) ms else null
+        }
+        val ticks = try { procStatCpuTicks(File("/proc/$pid/stat").readText()) } catch (_: Exception) { null } ?: return null
+        val hz = try { Os.sysconf(OsConstants._SC_CLK_TCK) } catch (_: Exception) { 100L }
+        return ticksToMs(ticks, if (hz > 0) hz else 100L)
+    }
+
+    private class Leg(val rx: Map<Int, Long>, val tx: Map<Int, Long>)
+    private class Net(val wifi: Leg?, val mobile: Leg?, val period: String?)
+
+    private fun legBytes(leg: Leg?, uid: Int?): Pair<Long?, Long?> {
+        if (leg == null || uid == null) return null to null
+        return (leg.rx[uid] ?: 0L) to (leg.tx[uid] ?: 0L)
+    }
+
+    @Suppress("DEPRECATION")
+    private fun loadNet(c: Context, start: Long, end: Long): Net {
+        if (!hasUsage(c)) return Net(null, null, null)
+        val nsm = c.getSystemService(NetworkStatsManager::class.java) ?: return Net(null, null, null)
+        val sub = if (Build.VERSION.SDK_INT >= 29) null else ""
+        val wifi = queryNet(nsm, ConnectivityManager.TYPE_WIFI, sub, start, end)
+        val mobile = queryNet(nsm, ConnectivityManager.TYPE_MOBILE, sub, start, end)
+        val period = if (wifi != null || mobile != null) "6h" else null
+        return Net(wifi, mobile, period)
+    }
+
+    /** Null when the query fails or returns no buckets. An empty success is not "every app used 0". */
+    private fun queryNet(nsm: NetworkStatsManager, type: Int, sub: String?, start: Long, end: Long): Leg? {
+        var stats: NetworkStats? = null
+        return try {
+            stats = nsm.querySummary(type, sub, start, end) ?: return null
+            val rx = HashMap<Int, Long>()
+            val tx = HashMap<Int, Long>()
+            val bucket = NetworkStats.Bucket()
+            var saw = false
+            while (stats.hasNextBucket()) {
+                if (!stats.getNextBucket(bucket)) break
+                val uid = bucket.uid
+                if (uid < 0) continue
+                var counted = false
+                if (bucket.rxBytes >= 0) { rx[uid] = (rx[uid] ?: 0L) + bucket.rxBytes; counted = true }
+                if (bucket.txBytes >= 0) { tx[uid] = (tx[uid] ?: 0L) + bucket.txBytes; counted = true }
+                if (counted) saw = true
+            }
+            if (saw) Leg(rx, tx) else null
+        } catch (_: Exception) {
+            null
+        } finally {
+            try { stats?.close() } catch (_: Exception) {}
+        }
+    }
+
+    private fun uidOf(c: Context, pkg: String): Int? = try {
+        c.packageManager.getApplicationInfo(pkg, 0).uid
+    } catch (_: Exception) { null }
 
     private data class Row(
         val pkg: String, val label: String, val lastUsed: Long, val foregroundMs: Long,
