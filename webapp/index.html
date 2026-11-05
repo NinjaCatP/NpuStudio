@@ -4,7 +4,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#14161c">
 <title>NpuStudio Companion</title>
-<link rel="stylesheet" href="app.css">
+<link rel="stylesheet" href="app.css?v=1.9.2">
 </head><body>
 <header><div class="brand"><span class="logo">N</span> NpuStudio</div><button id="conn" class="pill">🔗 …</button></header>
 
@@ -30,6 +30,7 @@
 </section>
 
 <section id="tab-gen" class="page hidden">
+  <button id="galOpenBtn" class="ghost" style="width:100%;margin-bottom:6px">🖼️ Gallery – every picture saved on the desktop and laptop</button>
   <label>Prompt<textarea id="genPrompt" rows="3" placeholder="a cozy cabin in snowy mountains at dusk"></textarea></label>
   <label>Size<select id="genSize">
     <optgroup label="Phone wallpaper">
@@ -48,7 +49,9 @@
   <div class="row">
     <label class="grow">Upscale with<select id="genUp"><option value="sharp">Sharp</option><option value="fast">Fast</option></select></label>
     <label class="grow">Steps<input id="genSteps" type="number" min="1" max="50" value="50"></label>
+    <label class="grow">Device<select id="genDev"><option value="Auto">Auto (fastest to finish)</option><optgroup label="Desktop PC"><option value="NVIDIA">Desktop RTX 4070 (4070D)</option><option value="Intel Arc">Desktop Intel UHD 770 (UHD D, slow)</option><option value="CPU">Desktop CPU</option></optgroup><optgroup label="Laptop"><option value="Laptop NPU">Laptop NPU (NPU L)</option><option value="Laptop Intel Arc">Laptop Intel Arc (Arc L)</option><option value="Laptop RTX 4070">Laptop RTX 4070 (4070L)</option></optgroup><option value="Both machines">Both machines (2 pictures)</option><option value="All chips">All chips (1 picture per free chip, both PCs)</option></select></label>
   </div>
+  <div id="genMulti" class="hidden"><label class="chk"><input type="checkbox" id="genRandEach" checked> Random seed for each picture</label><label class="chk"><input type="checkbox" id="genSkipSlow"> Skip the slow Intel UHD 770 (All chips)</label></div>
   <label class="chk"><input type="checkbox" id="genFix" checked> Auto-fix faces (sharper, symmetrical eyes after drawing)</label>
   <div class="row"><label class="grow">Seed<input id="genSeed" type="number" value="42"></label><button id="genRand" class="ghost">🎲 Random</button></div>
   <p id="genPlan" class="muted small"></p>
@@ -62,6 +65,16 @@
   <div id="stage" class="stage hidden"><img id="editIn" alt=""><canvas id="maskCv"></canvas></div>
   <p id="editInfo" class="muted small"></p>
   <div id="editTools" class="hidden">
+    <label>Device <span class="muted small">(Remove background &amp; AI erase)</span><select id="editDev"><option value="Auto">Auto (fastest to finish)</option><optgroup label="Desktop PC"><option value="NVIDIA">Desktop RTX 4070 (4070D)</option><option value="Intel Arc">Desktop Intel UHD 770 (UHD D, slow)</option><option value="CPU">Desktop CPU</option></optgroup><optgroup label="Laptop"><option value="Laptop NPU">Laptop NPU (NPU L)</option><option value="Laptop Intel Arc">Laptop Intel Arc (Arc L)</option><option value="Laptop RTX 4070">Laptop RTX 4070 (4070L)</option></optgroup><option value="Both machines">Both machines</option></select></label>
+    <details open><summary>✂️ Remove background</summary>
+      <p class="muted small">Cuts out the main subject and makes the background transparent (PNG). Uses the Device above.</p>
+      <button id="editBg2" class="primary wide">✂️ Remove background</button>
+    </details>
+    <details open><summary>📱 Remove social media overlay</summary>
+      <p class="muted small">For a screenshot of a video / feed post: finds the app's buttons, counts, name / caption / hashtags, music line, tabs and bars, shows them in cyan, then fills them in. Fix the cyan with the brush (➕ Add / ➖ Erase, below) before removing. Runs on the CPU.</p>
+      <div class="row wrap"><label class="chk"><input type="checkbox" id="ovText" checked> Text</label><label class="chk"><input type="checkbox" id="ovIcons" checked> Icons / buttons</label><label class="chk"><input type="checkbox" id="ovBars" checked> Top / bottom bars</label><label class="chk"><input type="checkbox" id="ovShade" checked> Top shading</label><label class="chk"><input type="checkbox" id="ovHQ"> High quality fill (slower, GPU; turns on by itself for big areas)</label></div>
+      <div class="row"><button id="ovFind" class="grow">🔍 Find overlay</button><button id="ovGo" class="primary grow">✨ Remove overlay</button></div>
+    </details>
     <details open><summary>Transform</summary>
       <div class="row wrap"><button data-tf="rotl">⟲ 90</button><button data-tf="rotr">⟳ 90</button><button data-tf="r180">180</button><button data-tf="fliph">Flip H</button><button data-tf="flipv">Flip V</button></div>
       <div class="row"><label class="grow">Crop<select id="cropAsp"><option value="">Free (no crop)</option><option value="1">1:1</option><option value="1.3333">4:3</option><option value="1.5">3:2</option><option value="1.6">16:10</option><option value="1.7778">16:9</option><option value="1.6">2880x1800 (screen)</option><option value="0.5625">9:16</option><option value="0.45">Phone 9:20</option></select></label><button id="cropGo">Apply crop</button></div>
@@ -91,6 +104,7 @@
       <button id="editGo" class="primary wide">AI Change</button>
     </details>
     <div class="row"><button id="editSave" class="grow">💾 Save</button><button id="editShare" class="grow">📤 Share</button><button id="editToUp" class="grow">🔍 To Upscale</button></div>
+    <div class="row" id="editSaveAs"></div>
   </div>
   <div id="editJob"></div><div id="editOut" class="out"></div>
 </section>
@@ -103,7 +117,7 @@
   <div class="seg" id="upScale"><button data-v="2">2×</button><button data-v="4" class="on">4×</button><button data-v="8">8×</button><button data-v="16">16×</button></div>
   <div class="row">
     <label class="grow">Model<select id="upModel"><option value="sharp">Sharp (Real-ESRGAN x4plus)</option><option value="fast">Fast (Intel SR-1032)</option></select></label>
-    <label class="grow">Desktop chip<select id="upDev"><option>Auto</option><option>NVIDIA</option><option value="Intel Arc">Intel UHD 770</option><option>CPU</option><option>All</option></select></label>
+    <label class="grow">Device<select id="upDev"><optgroup label="Desktop PC"><option value="Auto">Auto</option><option value="NVIDIA">Desktop RTX 4070 (4070D)</option><option value="Intel Arc">Desktop Intel UHD 770 (UHD D)</option><option value="CPU">Desktop CPU</option><option value="All">All (desktop chips)</option></optgroup><optgroup label="Laptop"><option value="Laptop NPU">Laptop NPU (NPU L)</option><option value="Laptop Intel Arc">Laptop Intel Arc (Arc L)</option><option value="Laptop RTX 4070">Laptop RTX 4070 (4070L)</option></optgroup><option>Both machines</option></select></label>
   </div>
   <label>Result format<select id="upFmt"><option value="AUTO">Auto (PNG, JPEG when huge)</option><option>PNG</option><option>JPEG</option></select></label>
   <p id="upPlan" class="small"></p><p id="upEst" class="small"></p>
@@ -114,7 +128,7 @@
 <section id="tab-ana" class="page hidden">
   <button id="anaPick" class="wide">📷 Pick a picture to analyze</button>
   <img id="anaIn" class="preview hidden" alt=""><p id="anaSize" class="muted small"></p><p id="anaPose" class="muted small"></p>
-  <div class="row"><label class="grow">Desktop chip<select id="anaDev"><option>Auto</option><option>NVIDIA</option><option value="Intel Arc">Intel UHD 770</option><option>CPU</option></select></label>
+  <div class="row"><label class="grow">Device<select id="anaDev"><option value="Auto">Auto (fastest to finish)</option><optgroup label="Desktop PC"><option value="Intel Arc">Desktop Intel UHD 770 (UHD D)</option><option value="CPU">Desktop CPU</option></optgroup><optgroup label="Laptop"><option value="Laptop Intel Arc">Laptop Intel Arc (Arc L)</option></optgroup></select></label>
     <label class="chk"><input type="checkbox" id="anaTxt"> Save .txt</label></div>
   <button id="anaGo" class="primary wide" title="Run the analysis again (e.g. after changing Chip)">🔄 Re-analyze</button>
   <div id="anaJob"></div>
@@ -137,7 +151,7 @@
   <p id="connNote" class="muted small"></p>
 </section>
 
-<section id="tab-mon" class="page hidden"><div id="monBox"></div><p class="muted small">Updates every 2 s. The laptop appears when its NpuStudio app is open and paired.</p></section>
+<section id="tab-mon" class="page hidden"><div class="row" id="vramBar" style="gap:6px;flex-wrap:wrap"><b class="grow">🧹 Clear VRAM</b><button class="ghost" data-vram="desktop">Desktop</button><button class="ghost" data-vram="laptop">Laptop</button><button class="ghost" data-vram="both">Both PCs</button></div><div id="vramMsg" class="small"></div><div id="monBox"></div><p class="muted small">Updates every 2 s. The laptop appears when its NpuStudio app is open and paired.</p></section>
 
 <section id="tab-desk" class="page hidden"><div id="deskBox"></div>
   <h3>NpuStudio apps</h3><div id="pcsBox"></div><p class="small muted">↻ Restart closes and reopens the NpuStudio app only, never the PC.</p>
@@ -160,5 +174,5 @@
 
 <div id="dlg" class="dlg hidden"><div class="card"><p id="dlgQ"></p><div class="row"><button id="dlgNo" class="grow">No</button><button id="dlgYes" class="primary grow">Yes</button></div></div></div>
 <input type="file" id="fileIn" accept="image/*" class="hidden">
-<script src="app.js"></script>
+<script src="app.js?v=1.9.2"></script>
 </body></html>

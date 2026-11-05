@@ -260,3 +260,171 @@ Face and eye detailer (v1.6.2)
 - Analyze tab: the button reads '🔄 Re-analyze' on both PCs and the phone, with the tooltip 'Run the analysis again (e.g. after changing Chip)'.
 - Image Gen: fixed "gen() got multiple values for argument 'progress'" when the generation is routed through the Desktop/laptop link (the remote wrapper now accepts progress/status passed positionally); all call sites checked with a signature audit.
 - 1.7.0 Image Gen: default Steps is 50 on both PCs, the phone and the server (when a request leaves steps out). The engine is LCM Dreamshaper, whose scheduler tops out at 50 steps, so 50 is also the max. The phone remembers your last-used Steps.
+- 1.7.1 Chat: open an app and click something in it. "open Comfy Desktop and click Local", "launch X then click Y",
+  "click Y in X", "in X click Y", or just "click Y" (uses the app you last opened). Finds the window by title or
+  process, brings it to the front, waits up to 20 s for the button (Windows UI Automation; falls back to Windows OCR
+  of that window for apps like Electron that hide their buttons), then clicks it and says what it clicked or
+  'I couldn't find "Local" in Comfy Desktop'. Only clicks inside the named app's window, never types anything.
+  Buttons with risky words (delete, remove, uninstall, buy, purchase, pay, send, submit, sign out, log out, format,
+  erase, reset...) ask you first. Works from the phone/other PC through the Control picker. New: uiclick.py; needs
+  the uiautomation + winrt-Windows.Media.Ocr packages (installed into venv).
+- 1.7.2 Phone Upscale tab: "Device" picker like the laptop app. Desktop PC chips (Auto, NVIDIA, Intel UHD 770, CPU,
+  All), the laptop's chips (Laptop NPU, Laptop Intel Arc, Laptop RTX 4070: the whole picture is upscaled on the
+  laptop) or Both machines (desktop does the top ~60%, laptop the rest, at the same time). Remembered on the phone.
+  If the laptop can't be reached the job runs on the desktop and the result says "(laptop offline)".
+  No NPU option for the desktop (it has none).
+- 1.7.2 Busy-aware Auto (upscale, PC app + phone): each upscale marks its chip busy (models/busy/, shared by the app and
+  the server on that PC). With Device = Auto the next upscale goes to the free chip expected to be fastest (measured
+  timings in models/devbench.json first, otherwise NVIDIA > Intel Arc > NPU; CPU only if nothing else). If every chip is
+  busy: the laptop app sends it to the desktop if online, the phone (desktop server) sends it to the laptop if it is
+  free; otherwise it waits on the chip whose job started first. The status/result shows which device Auto picked.
+  Also skips a chip another app is loading: NVIDIA counts as busy at >=70% use (2 samples) or <1.5 GB VRAM free,
+  and the status says why (e.g. "NVIDIA busy (another app, 100%), using Intel Arc"). Arc/NPU outside load not checked yet.
+  Image Gen / AI Change / Erase still pick their chip once when the model loads (not per job).
+- 1.7.3 Image Gen picks its chip PER JOB (PC apps with Device = Auto, and the phone's new Image Gen "Device" box:
+  Auto, NVIDIA, Intel UHD 770, CPU, Laptop NPU, Laptop Intel Arc, Laptop RTX 4070; no "Both machines" - one picture
+  can't be split). Auto estimates when each chip would FINISH: time left on its running NpuStudio jobs + model load if
+  it isn't loaded + its run time (learned from real runs in devbench.json "gen_step", rough defaults otherwise; a chip
+  another app is loading, e.g. ComfyUI on the RTX, counts ~3x slower). The other PC's chips are included when it is
+  online (it answers /api/v1/gen_eta; +4 s transfer). The status/result says why, e.g. "Intel Arc should finish first
+  (~60s); vs NVIDIA ~95s (NVIDIA busy, ~80s left)". Each chip has its own lock and model, so different chips generate
+  at the same time; at most 2 OpenVINO chips stay loaded, and our idle NVIDIA model is unloaded when another app leaves
+  under 1.5 GB VRAM free. Upscale Auto still uses the other PC only when every local chip is busy.
+- 1.7.4 Edit tab (phone) gets a "Device" box for Remove background and AI erase: Auto (fastest to finish), desktop
+  NVIDIA / Intel UHD 770 / CPU, Laptop NPU / Intel Arc / RTX 4070 (via the laptop's share server). PC apps with
+  Device = Auto pick per job too. Same finish-time Auto as Image Gen (busy markers, other-app NVIDIA load, learned
+  timings in devbench.json "job_s", other PC's chips via /api/v1/eta + transfer time), one lock per chip so two chips
+  work at once. Laptop NPU can't do AI erase (LaMa hangs on NPU) - it says so. AI Change / Fix face/eyes / Analyze keep
+  their current chip choice (their several models can't be safely switched per job yet). Safety refusals unchanged.
+- 1.7.4 Upscale Auto now compares the other PC's chips by finish time too (tiles x seconds/tile + wait + load +
+  transfer), not only when every local chip is busy.
+- 1.7.4 Phone Edit tab: "Device" box for Remove background and AI erase (Auto, NVIDIA, Intel UHD 770, CPU, Laptop NPU,
+  Laptop Intel Arc, Laptop RTX 4070). Per-job chip with its own model + lock (chips work at the same time), finish-time
+  Auto (busy markers, other-app NVIDIA load, learned timings in devbench.json "job_s", the other PC via /api/v1/eta).
+  The PC apps' Remove background / AI erase do the same when Device = Auto. AI Change / Fix face-eyes / Find target keep
+  their own fixed chip logic (several models per job; not switchable per job yet). Laptop NPU for AI erase fails (LaMa
+  can't run on NPU) - Auto never picks it.
+  Upscale Auto now compares the other PC's chips by finish time too (tiles x measured s/tile + transfer + load), not only
+  when every local chip is busy.
+  Version-safe: a Device value the server doesn't know runs as Auto with a note (no error), and the phone hides Device
+  choices the server doesn't list in /api/v1/options.
+- 1.7.5 Phone web UI: shows its real version (was stuck saying 1.7.1), app.js/app.css load with ?v=, the server sends
+  no-store headers, and a page older than the server's version.json reloads itself once (clears any WebView caches).
+  Device boxes always list every choice: ones the server doesn't support are greyed "(update server)", laptop chips
+  are greyed "(offline)" when the laptop isn't reachable (/api/v1/options laptop_online).
+
+1.7.6 - Phone in the "NpuStudio apps" list
+- Desktop tab now lists this phone under the PCs: model name (e.g. Galaxy S24 Ultra), "this device", web UI version, Android app version + shell number. "Reload page" button (no restart).
+- Web UI sends X-UI-Version / X-App-Version / X-Phone-Model with its requests; the desktop server stores them per phone and shows them in /api/v1/devices and in the PC app's Control list.
+- Android app versionName is mapped from the shell number (shell 3 = app 2.1) because the shell only exposes its number.
+
+1.7.7 - Stale server detection + device box audit
+- Cause of greyed "Laptop ... (update server)" in Upscale: the process answering port 47860 is an OLD worker_server (started 12:37 PM, never restarted). version.json is read from disk, so the Desktop tab showed 1.7.6 anyway. Image Gen looked fine only because the old server sends no gen list (treated as "all supported").
+- Server reports server_code + pid in /options and /info; Desktop tab shows the running server code. With an old server, laptop/both options grey in every box as "(old server still running)".
+- Analyze chip box is now checked against the server's analyze_devices list too.
+
+1.7.8 - Restart also restarts the desktop server
+- Desktop tab "Restart" on the desktop now restarts the phone server too (same busy warning): the server starts a detached helper that re-runs the "NpuStudio Server (boot)" task, then exits. Laptop restart unchanged.
+- Note: the boot-task server runs in a separate (S4U) logon, so it can't be ended from a normal user shell; this restart path is the clean way.
+
+1.7.9 - Server crash fix for /options and /devices
+- ROOT CAUSE of the greyed phone Device boxes since 1.7.2: api_get() had a local "import devices" (for /eta) that shadowed the devices() function, so /api/v1/options and /api/v1/devices crashed (UnboundLocalError) on every new server; only the old 12:37 process answered. Fixed (import as devmod).
+- PC app Upscale: error message lambda kept a deleted exception variable (fixed).
+
+1.8.0 - Fixes from the live device tests + responsive toolbar
+- Upscale Device "CPU" was ignored (ran on NVIDIA): devices.plan now honours an explicit CPU.
+- AI erase: LaMa fails to compile on the Intel GPU plugin (desktop NVIDIA/UHD and laptop chips), and since 1.7.4 a chosen chip had no fallback, so erase failed everywhere except CPU. Now a chip that fails falls back to the next chip, then CPU (as before 1.7.4); Auto skips chips that failed this session; a chip that can't run the feature at all (Laptop NPU for erase) uses CPU and says so.
+- PC app toolbar wraps onto a second row when the window is narrow (nothing hidden any more, e.g. the Server button at ~1024 px); window minimum size 720x480.
+- AI erase (LaMa) is CPU-only now: it failed to compile on every GPU in testing; CPU takes ~1-2 s.
+
+1.8.1 - Both machines for Gen, laptop chips for Analyze
+- Image Gen "Both machines (2 pictures)": one picture on the fastest desktop chip and one on the fastest laptop chip at the same time (seeds N and N+1, or the same seed if you typed one). Both are shown on the phone and saved to output\gen\<date>\. Greyed "(offline)" when the laptop is off.
+- Edit "Both machines" is shown greyed "(not for Edit)": Remove background / AI erase work on one picture as a single model pass (LaMa only on CPU), so splitting it across PCs wouldn't make it faster.
+- Analyze: box renamed "Device"; Laptop NPU / Intel Arc / RTX 4070 run through the laptop share server (it has Phi-3.5-vision). Auto picks by finish time across both PCs (learned per chip).
+- Analyze chip choice uses each PC's real OpenVINO device names (the laptop's GPUs were hard-coded to the desktop's numbering).
+
+1.8.1b - Image Gen "All chips": one picture on every free chip of both PCs at once (desktop NVIDIA + Intel UHD, laptop NPU + Arc + RTX; offline/busy chips skipped, optional "Skip slow Intel UHD"), with per-chip progress and time left. New "Random seed for each picture" checkbox (on by default; off = every chip uses the same seed). Results show as a grid on the phone (each with Save/Send to Edit/Upscale) and as clickable thumbnails in the PC apps' Image Gen (new "Pictures" box: One / Both machines / All chips). Each picture is saved to output\gen\<date>\ with the chip and seed in the file name and metadata.
+1.8.1c - Multi-chip Gen results now show as tabs, one per chip used (phone and PC apps): each tab has its own status (queued/running/done/skipped/offline/error), progress, time left, seed, and the picture with View full / Save / Send to Edit / Send to Upscale / Use seed. The first picture to finish is selected automatically. Chips are named by machine + real model everywhere (Desktop RTX 4070, Desktop Intel UHD 770, Laptop RTX 4070, Laptop Intel Arc, Laptop NPU) instead of a bare "NVIDIA".
+1.8.1d - Short chip labels on the Gen tabs (4070D, 4070L, UHD D, Arc L, NPU L; hover/inside shows the full name); Device boxes show the full name with the short one in brackets. Analyze reports the real chip used (and says when it fell back).
+
+1.8.2 - Analyze's Device box now lists only chips the vision model really runs on: Auto, Desktop Intel UHD 770 (UHD D), Desktop CPU, Laptop Intel Arc (Arc L). The RTX 4070s and the NPU were removed (they always fell back to the Intel GPU). Old saved choices (4070D, 4070L, NPU L) are switched to Auto with a note. Auto picks between the working chips by finish time across both PCs. Same list in the PC app's Analyze tab.
+
+1.8.3 - Chip Monitor (PC apps; same colours and order on desktop, laptop and phone: 4070D orange, UHD D red, 4070L green, Arc L light blue, NPU L purple) shows every chip of both PCs: this PC's own plus the other PC's (polled from its server), including the desktop Intel UHD 770 that was missing on the laptop. Each graph shows use, memory, power and temp (N/A when there's no sensor) and jobs running on that chip. Labels: NPU L, Arc L, 4070L (laptop RTX 4070), 4070D (desktop RTX 4070), UHD D (desktop Intel UHD 770). Graphs shrink to fit small windows and scroll below that. Phone Monitor tab uses the same labels and shows jobs per chip.
+
+1.8.4 - Phone Gallery
+- New "Gallery" button at the top of the phone's Gen tab: every picture NpuStudio has saved on the desktop or the laptop
+  (whole output folder, all kinds and dates, plus older results kept in the app folder such as ba_*.jpg and r9\).
+- Filters: All / Gen / Edit / Upscale / AI Change / Remove bg / Other. Newest first, grouped by date, loads 60 at a time.
+- Small thumbnails are made on first view and cached (models\thumbs); big files are never sent for thumbnails.
+- Tap = full-screen viewer (swipe, pinch / double-tap zoom, chip/seed/prompt/size/date). Buttons: Save to phone (full size),
+  Share, Send to Edit, Send to Upscale, Analyze, Use prompt + seed in Gen, Delete (asks first; goes to that PC's Recycle Bin).
+- Long-press a thumbnail to select several, then Save or Delete them together (one confirm).
+- Phone Monitor: every chip card (4070D, UHD D, 4070L, Arc L, NPU L) now uses the same layout - Chip, Use, Memory,
+  Power, Temp, Jobs running (N/A when a value isn't available) - with its colour stripe and a small Use % sparkline.
+- Phone Monitor: one card per chip (deduplicated by machine + chip, one laptop report), so it shows exactly 5 cards.
+
+1.8.5
+- Memory is shown in GB with one decimal on the phone Monitor cards and both PC Chip Monitors
+  (e.g. "3.2 / 12.0 GB" for the RTX cards where the total is known; "x.x GB dedicated / x.x GB shared" for the others).
+
+1.8.6
+- Phone Edit: "Remove background" now has its own section near the top of the Edit tools (it was hidden at the end of
+  the Brush mask section). Same server path as the PC (isnet), same Device picker (4070D, UHD D, CPU, NPU L, Arc L, 4070L);
+  result shows with Save / Share / To Upscale like the other Edit tools.
+
+1.8.7 - Save as PNG / JPG / WebP
+- Phone: a shared "Save as" choice (PNG / JPG / WebP, quality 30-100, default 92) under Save in Edit, Gen and Upscale
+  results, the Gallery viewer and the Gallery multi-select bar. Remembered on the phone. The picture is re-encoded on the
+  phone so the file really is that type with the right extension.
+- After Remove background, saving as JPG asks first (JPG can't keep transparency) and offers PNG.
+- PC Edit Save dialog: WebP added next to PNG and JPEG; JPG from a transparent picture gets a white background.
+- Android app source: the saved file's type now follows its extension (takes effect when the APK is rebuilt).
+
+1.8.8 - Remove social media overlay
+- Edit (phone and PC): "Remove social media overlay" for screenshots of your own posts from feed / short-video apps.
+  "Find overlay" marks the app UI it can see (top icons and page counter, page dots, side like/comment counts,
+  avatar / name / caption line) as a mask you can fix with the normal brush (Add / Erase / Undo) before removing.
+  Checkboxes: Text, Icons/buttons, Top/bottom bars. Solid status / navigation bars are cropped off.
+- "Remove overlay" fills the masked parts with LaMa on the CPU, piece by piece. Check the mask first: detection is
+  a heuristic and can miss UI on busy backgrounds or mark bright bits of the picture.
+
+1.8.9 - Better overlay detection
+- Find overlay now ignores bright strokes in the artwork (white hair, stripes, background patterns): text has to form
+  left-aligned rows of letters, icons count only in the usual UI places (top right, the side column growing up from
+  the bottom, the bottom-left caption area).
+- Round avatars next to the username are found as circles; page dots are found as a row of 3+ equally spaced dots
+  and the whole dot row / pill is masked; page-counter pills ("5/10") are masked as a whole pill; white
+  "Subscribe"/"Follow" buttons are masked.
+- New "Top shading" checkbox (on by default): lifts the gray gradient apps put over the top of the picture.
+- Still a heuristic: check the cyan mask before removing.
+
+1.9.0 - Cleaner overlay fill
+- Remove overlay fills each masked part on its own context crop around it (about 3x the part, native resolution
+  where it fits LaMa's 512 px input), reflect-padded at the picture edge, and blends it back with a soft edge - skirt
+  hems, stripes and legs now continue through where a button was instead of a gray smear.
+- Tighter masks: the white Subscribe/Follow pill is masked in its exact rounded shape; the username letters that sit
+  on light skin right after the avatar are now covered too (no ghost letters); the page-dots mask covers the whole pill.
+- New "High quality fill" checkbox (off by default, phone and PC): large parts are then refined with SD inpainting
+  at low strength (0.45) with a neutral "continue the surrounding picture" prompt, on the inpaint chip chosen by the
+  Device setting. It only continues what is around the hole (no body or clothing changes). Slower.
+
+1.9.1 - Info cards
+- Overlay detection now finds translucent "frosted" info cards (several centred text lines inside a rounded box with
+  a thin light border, e.g. a date/weather card) and masks the whole card including its border.
+- Bright sky showing between branches near the top right is no longer mistaken for app icons.
+- High quality fill: very large parts (like a whole card) are refined with stronger SD inpainting (strength 0.68,
+  40 steps) so the picture really continues through the hole instead of a blurry LaMa patch. Small parts keep 0.45.
+
+1.9.2 - High quality fill for big cards
+- High quality fill now handles big holes (an info card over the feet / ground) properly on an NVIDIA GPU: it crops
+  the hole plus generous context (more above, where the subject continues), works at SD's own resolution (short side
+  512 px), starts from the LaMa fill, uses strength 0.85, makes 2 candidates (fixed seeds, reproducible) and keeps the
+  one whose edges match the surroundings best, then scales back and feathers it in.
+- The prompt is built automatically: the Analyze vision model tags what is around the hole (e.g. "pumpkins, fog,
+  lace-up boots, night") + "same art style, detailed". Text/card/weather words and faces/heads/animals are dropped,
+  and the negative prompt blocks text, cards, frames, blur, duplicates and new faces/animals. It only continues what
+  is already there - no body or clothing changes.
+- If SD draws new objects into an area that is a plain/blurred backdrop (much busier than the picture beside the
+  hole), that candidate is thrown away and the clean LaMa fill is kept (the note says so).
+- When the mask covers more than 8% of the picture and an NVIDIA GPU is present, High quality turns on by itself
+  (the result note says "turned on automatically"). Ticking the box forces it on for any size.
