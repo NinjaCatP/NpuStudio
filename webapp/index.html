@@ -4,7 +4,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#14161c">
 <title>NpuStudio Companion</title>
-<link rel="stylesheet" href="app.css?v=1.9.4">
+<link rel="stylesheet" href="app.css?v=1.9.5">
 </head><body>
 <header><div class="brand"><span class="logo">N</span> NpuStudio</div><button id="conn" class="pill">🔗 …</button></header>
 
@@ -155,7 +155,8 @@
 
 <section id="tab-heat" class="page hidden">
   <div class="row" style="align-items:center"><b class="grow">Recent background activity</b><button id="heatRefresh" class="ghost">Refresh</button></div>
-  <p class="muted small">Ranked from Android Usage Access over the last 6 hours. Modern Android does not give third-party apps a reliable live per-app CPU or battery-heat meter, so this is recent usage, not a proven heat cause.</p>
+  <p class="muted small">Ranked from Android Usage Access over the last 6 hours. Modern Android does not give third-party apps a reliable live per-app CPU meter or battery-heat sensor, so the order is recent usage, not a proven heat cause.</p>
+  <p class="muted small">Memory, CPU, and network are filled in only when Android actually returns them. N/A means that number was blocked, not that the app used nothing. On Android 10 and later, memory (PSS; RSS is not offered) and CPU are usually available only for NpuStudio itself. Network is Wi-Fi plus mobile bytes for these 6 hours when Usage Access allows it. CPU percent appears after you tap Refresh again a little later.</p>
   <p class="muted small">Google Maps navigation still needs this phone's GPS, so this mainly helps other background junk. Maps, Tailscale, NpuStudio, phone and messages, the home screen, the keyboard, and system core are shown greyed and can't be stopped here.</p>
   <div id="heatBox"></div>
 </section>
@@ -182,5 +183,5 @@
 
 <div id="dlg" class="dlg hidden"><div class="card"><p id="dlgQ"></p><div class="row"><button id="dlgNo" class="grow">No</button><button id="dlgYes" class="primary grow">Yes</button></div></div></div>
 <input type="file" id="fileIn" accept="image/*" class="hidden">
-<script src="app.js?v=1.9.4"></script>
+<script src="app.js?v=1.9.5"></script>
 </body></html>

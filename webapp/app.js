@@ -1,7 +1,7 @@
 // NpuStudio Companion web UI. Served by the desktop at /app; the Android shell (window.NpuShell) is optional.
 "use strict";
 const $ = id => document.getElementById(id);
-const UI_VERSION = "1.9.4";
+const UI_VERSION = "1.9.5";
 const Shell = window.NpuShell || null;
 const shellVersion = Shell && Shell.shellVersion ? Number(Shell.shellVersion()) : 0;
 
@@ -16,10 +16,11 @@ const key = () => localStorage.getItem("npuKey") || "";
 // ---------- API ----------
 // Identify this phone to the desktop so it shows in every Control picker (same id as the v2.1 background link).
 // Android app versionName per shell number (from android/app/build.gradle.kts); the shell only exposes its number
-const SHELL_APP = { 3: "2.1", 4: "2.2" };
+const SHELL_APP = { 3: "2.1", 4: "2.2", 5: "2.3" };
 const SHELL_BLURB = {
   3: "adds brightness, Do Not Disturb, ring modes, calls/texts, maps, notes, read aloud and Find my phone",
-  4: "adds the Heat tab (recent background activity, and Stop for apps that are not needed)"
+  4: "adds the Heat tab (recent background activity, and Stop for apps that are not needed)",
+  5: "adds memory, CPU, and network on the Heat tab where Android lets a normal app read them"
 };
 function appVersion() { try { if (Shell && Shell.appVersion) return String(Shell.appVersion()); } catch (e) {} return shellVersion ? (SHELL_APP[shellVersion] || "") : ""; }
 const MODELS = { "SM-S928": "Galaxy S24 Ultra", "SM-S926": "Galaxy S24+", "SM-S921": "Galaxy S24", "SM-S918": "Galaxy S23 Ultra", "SM-S938": "Galaxy S25 Ultra" };
@@ -829,6 +830,38 @@ function heatDur(ms) {
   if (m < 60) return m + " min on screen";
   return Math.floor(m / 60) + " h" + (m % 60 ? " " + (m % 60) + " min" : "") + " on screen";
 }
+function heatBytes(n) {
+  const v = Number(n);
+  if (!isFinite(v) || v < 0) return "N/A";
+  if (v < 1000) return Math.round(v) + " B";
+  if (v < 1e6) return (Math.round(v / 100) / 10).toString().replace(/\.0$/, "") + " KB";
+  if (v < 1e9) return (Math.round(v / 1e5) / 10).toString().replace(/\.0$/, "") + " MB";
+  return (Math.round(v / 1e8) / 10).toString().replace(/\.0$/, "") + " GB";
+}
+function heatMb(kb) {
+  const mb = Number(kb) / 1024;
+  if (!isFinite(mb) || mb < 0) return "N/A";
+  if (mb < 10) return (Math.round(mb * 10) / 10).toString().replace(/\.0$/, "") + " MB";
+  return Math.round(mb) + " MB";
+}
+function heatMem(a) {
+  if (a.rss_kb != null && Number(a.rss_kb) > 0) return heatMb(a.rss_kb) + " RSS";
+  if (a.pss_kb != null) return heatMb(a.pss_kb) + " PSS";
+  return "N/A";
+}
+function heatCpu(a) {
+  if (a.cpu_pct != null && isFinite(Number(a.cpu_pct))) return (Math.round(Number(a.cpu_pct) * 10) / 10).toString().replace(/\.0$/, "") + "%";
+  if (a.cpu_time_ms != null && isFinite(Number(a.cpu_time_ms))) {
+    const s = Number(a.cpu_time_ms) / 1000;
+    return (s < 10 ? (Math.round(s * 10) / 10).toString().replace(/\.0$/, "") : String(Math.round(s))) + " s since start";
+  }
+  return "N/A";
+}
+function heatNet(a) {
+  if (a.rx_bytes == null || a.tx_bytes == null) return "N/A";
+  const scope = a.network_scope === "wifi" ? " (Wi-Fi only)" : a.network_scope === "mobile" ? " (mobile only)" : "";
+  return "↓" + heatBytes(a.rx_bytes) + " ↑" + heatBytes(a.tx_bytes) + scope;
+}
 function heatShellOk() {
   return !!(Shell && typeof Shell.heatList === "function" && typeof Shell.heatStop === "function" && typeof Shell.heatAppInfo === "function" && typeof Shell.openUsageAccess === "function");
 }
@@ -840,8 +873,8 @@ async function heatLoad() {
   try {
     if (!heatShellOk()) {
       box.innerHTML = Shell
-        ? `<p>Heat needs the NpuStudio Companion update (app 2.2, shell 4). Install <b>NpuStudio-Companion.apk</b> over this one — the note at the top of the Chat tab has the link. Pairing is kept.</p>`
-        : `<p>Heat reads Android Usage Access, which only the NpuStudio Companion app can do (shell 4). A desktop browser can't see which apps this phone used.</p>`;
+        ? `<p>Heat needs the NpuStudio Companion update (app 2.3, shell 5). Install <b>NpuStudio-Companion.apk</b> over this one — the note at the top of the Chat tab has the link. Pairing is kept.</p>`
+        : `<p>Heat reads Android Usage Access, which only the NpuStudio Companion app can do (shell 5). A desktop browser can't see which apps this phone used.</p>`;
       return;
     }
     box.innerHTML = `<p class="muted">Reading recent usage…</p>`;
@@ -863,6 +896,12 @@ async function heatLoad() {
       return;
     }
     box.innerHTML = "";
+    if (d.resources !== true) {
+      const note = document.createElement("p");
+      note.className = "muted small";
+      note.textContent = "Memory, CPU, and network need the companion app update (app 2.3, shell 5). This list is still recent usage only.";
+      box.appendChild(note);
+    }
     for (const a of apps) {
       const el = document.createElement("div");
       el.className = "heat-app" + (a.protected ? " prot" : "");
@@ -873,6 +912,7 @@ async function heatLoad() {
       if (a.fg_service_starts) bits.push("Foreground service started ×" + a.fg_service_starts);
       bits.push(a.package || "");
       el.innerHTML = `<b>${esc(a.label || a.package || "App")}</b><div class="sub">${esc(bits.filter(Boolean).join(" · "))}</div>`
+        + (d.resources === true ? `<div class="res">Memory ${esc(heatMem(a))} · CPU ${esc(heatCpu(a))} · Network ${esc(heatNet(a))}</div>` : "")
         + (a.protected ? `<div class="why">Protected — ${esc(a.reason || "needed")}. No Stop.</div>` : "");
       if (!a.protected) {
         const row = document.createElement("div"); row.className = "row";

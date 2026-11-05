@@ -434,4 +434,11 @@ Face and eye detailer (v1.6.2)
 - If Usage access is off, the tab explains that and opens the system Usage access screen. Grant it once for NpuStudio Companion, then Refresh.
 - Stop asks first. It uses killBackgroundProcesses when Android allows it and the app is not on screen. That only clears background processes (a foreground service can keep running, and Android may restart the app). It is not a Force stop. If a background kill isn't allowed, Stop opens that app's system App info page so you can tap Force stop. The App info button does the same. No root and no device admin.
 - Shown greyed, with a reason and no Stop: Google Maps and the default navigation app (and Android Auto / Waze), Tailscale, NpuStudio, the dialer and SMS app, the home screen, the keyboard, and system core including Play services (Maps still needs the phone GPS).
-- Needs companion shell 4 (app 2.2). Older shells keep the other tabs; latest_shell 4 shows the update banner. min_shell stays 1. Web UI 1.9.4.
+- Needs companion shell 4 (app 2.2) or newer. Older shells keep the other tabs. Web UI 1.9.4.
+
+1.9.5 - Heat row resource use
+- Each Heat card also shows memory, CPU, and network when Android gives those numbers to a normal sideloaded app. Missing numbers stay N/A. This is still not a heat sensor.
+- Memory is PSS (RSS only if the system actually returns summary.total-rss). Since Android 10, getProcessMemoryInfo is zeroed for every other UID, so on a Galaxy S24 Ultra memory is usually N/A except for NpuStudio itself.
+- CPU percent needs two samples, so it shows after a later Refresh, and only for processes this app is allowed to see (again, usually only itself). Otherwise it can show that process's CPU time since it started, or N/A. /proc for other apps is hidden. dumpsys is not used.
+- Network is Wi-Fi plus mobile bytes over the same 6 hours, from NetworkStatsManager, which Usage Access allows for apps on this user. Per-UID TrafficStats has been blocked for other apps since Android 7, so those calls are not shown as if they were the 6-hour total. If only one of Wi-Fi or mobile can be read, the card says so.
+- Needs companion shell 5 (app 2.3). A shell 4 phone still shows the Heat list and asks for this update before filling in resources. latest_shell 5. min_shell stays 1. Web UI 1.9.5.
