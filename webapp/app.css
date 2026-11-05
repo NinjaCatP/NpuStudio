@@ -46,6 +46,8 @@ input[type=range]{padding:0;height:28px}
 .heat-app.prot{background:#191b22;color:#9aa0ad}
 .heat-app.prot b{color:#b7bdc8;font-weight:600}
 .heat-app .sub{color:var(--mut);font-size:12px;margin-top:2px}
+.heat-app .res{font-size:12px;margin-top:4px;color:var(--fg)}
+.heat-app.prot .res{color:#d5dae3}
 .heat-app .why{color:#d4c4a1;font-size:12px;margin-top:3px}
 .heat-app .row{margin:8px 0 0;align-items:center}
 .heat-app button{padding:8px 12px}
