@@ -206,6 +206,11 @@ class MainActivity : AppCompatActivity() {
         @JavascriptInterface fun fallback() = runOnUiThread { if ((pairing?.order()?.size ?: 0) > 1) load() }
         @JavascriptInterface fun rePair() = runOnUiThread { pairLauncher.launch(Intent(this@MainActivity, PairActivity::class.java).putExtra("scan", true)) }
         @JavascriptInterface fun unpair() = runOnUiThread { HostRules.clear(this@MainActivity); pairing = null; pairLauncher.launch(Intent(this@MainActivity, PairActivity::class.java)) }
+        /** v4 Heat tab. UsageStats ranking, not a CPU or heat meter. See Heat.kt. */
+        @JavascriptInterface fun heatList(): String = Heat.list(this@MainActivity)
+        @JavascriptInterface fun heatStop(pkg: String): String = Heat.stop(this@MainActivity, pkg)
+        @JavascriptInterface fun heatAppInfo(pkg: String): String = Heat.openAppInfo(this@MainActivity, pkg)
+        @JavascriptInterface fun openUsageAccess(): String = Heat.openUsageAccess(this@MainActivity)
     }
 
     private fun safe(n: String) = n.replace(Regex("[^A-Za-z0-9._-]"), "_").take(80).ifEmpty { "npustudio.png" }
@@ -213,7 +218,7 @@ class MainActivity : AppCompatActivity() {
     private fun savePicture(bytes: ByteArray, name: String) {
         if (Build.VERSION.SDK_INT >= 29) {
             val v = ContentValues().apply {
-                put(MediaStore.Images.Media.DISPLAY_NAME, name); put(MediaStore.Images.Media.MIME_TYPE, "image/png")
+                put(MediaStore.Images.Media.DISPLAY_NAME, name); put(MediaStore.Images.Media.MIME_TYPE, when (name.substringAfterLast('.').lowercase()) { "jpg", "jpeg" -> "image/jpeg"; "webp" -> "image/webp"; else -> "image/png" })
                 put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/NpuStudio")
             }
             val uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, v)!!
