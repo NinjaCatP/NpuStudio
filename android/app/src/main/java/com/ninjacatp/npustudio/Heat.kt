@@ -168,7 +168,12 @@ object Heat {
                     .put("cpu_time_ms", jsonNum(use.cpuTimeMs))
                     .put("rx_bytes", jsonNum(use.rxBytes))
                     .put("tx_bytes", jsonNum(use.txBytes))
-                    .put("network_scope", use.networkScope ?: JSONObject.NULL))
+                    .put("network_scope", use.networkScope ?: JSONObject.NULL)
+                    .put("wifi_rx_bytes", jsonNum(use.wifiRx))
+                    .put("wifi_tx_bytes", jsonNum(use.wifiTx))
+                    .put("mobile_rx_bytes", jsonNum(use.mobileRx))
+                    .put("mobile_tx_bytes", jsonNum(use.mobileTx))
+                    .put("network_period", use.networkPeriod ?: JSONObject.NULL))
             }
             JSONObject().put("usage_access", true).put("window_hours", 6).put("resources", true).put("apps", arr).toString()
         }
@@ -297,18 +302,20 @@ object Heat {
     private class Use(
         val rssKb: Long?, val pssKb: Long?, val cpuPct: Double?, val cpuTimeMs: Long?,
         val rxBytes: Long?, val txBytes: Long?, val networkScope: String?,
+        val wifiRx: Long?, val wifiTx: Long?, val mobileRx: Long?, val mobileTx: Long?, val networkPeriod: String?,
     )
 
-    private class ResourceBook(val byPkg: Map<String, Use>, val scope: String?) {
-        fun forPackage(pkg: String) = byPkg[pkg] ?: Use(null, null, null, null, null, null, scope)
+    private class ResourceBook(val byPkg: Map<String, Use>) {
+        fun forPackage(pkg: String) = byPkg[pkg] ?: Use(null, null, null, null, null, null, null, null, null, null, null, null)
     }
 
     /**
      * Memory and CPU only for processes ActivityManager still lists (on Android 10+ that is
      * this app's own UID; other PSS values come back as 0 and are reported as unknown).
-     * Network is NetworkStatsManager for Wi-Fi and mobile over the same window, which Usage
-     * Access allows for apps in this user. TrafficStats per other UID has been blocked since
-     * Android 7, so it is not used as a stand-in.
+     * Network is NetworkStatsManager, queried separately for Wi-Fi and mobile over the same
+     * 6 hour window. Usage Access allows that for apps on this user. TrafficStats cannot split
+     * mobile from Wi-Fi per other UID (since Android 7 it only returns this app, since boot),
+     * so it is not used to fill a missing mobile or Wi-Fi figure.
      */
     private fun readResources(c: Context, pkgs: List<String>, start: Long, end: Long): ResourceBook {
         val am = c.getSystemService(ActivityManager::class.java)
@@ -334,11 +341,18 @@ object Heat {
                 if (samples.all { it.pct != null }) cpuPct = Math.round(samples.sumOf { it.pct ?: 0.0 } * 10.0) / 10.0
             }
             val uid = uidOf(c, pkg)
-            val rx = if (net == null || uid == null) null else net.rx[uid] ?: 0L
-            val tx = if (net == null || uid == null) null else net.tx[uid] ?: 0L
-            out[pkg] = Use(rss, pss, cpuPct, cpuTime, rx, tx, net?.scope)
+            val (wifiRx, wifiTx) = legBytes(net.wifi, uid)
+            val (mobileRx, mobileTx) = legBytes(net.mobile, uid)
+            val period = if (wifiRx != null || mobileRx != null) net.period else null
+            val combined = when {
+                wifiRx != null && mobileRx != null -> Triple(wifiRx + mobileRx, (wifiTx ?: 0L) + (mobileTx ?: 0L), "wifi+mobile")
+                wifiRx != null -> Triple(wifiRx, wifiTx, "wifi")
+                mobileRx != null -> Triple(mobileRx, mobileTx, "mobile")
+                else -> Triple(null, null, null)
+            }
+            out[pkg] = Use(rss, pss, cpuPct, cpuTime, combined.first, combined.second, combined.third, wifiRx, wifiTx, mobileRx, mobileTx, period)
         }
-        return ResourceBook(out, net?.scope)
+        return ResourceBook(out)
     }
 
     private class Proc(val pid: Int, val uid: Int, val pkgs: Set<String>, val name: String) {
@@ -399,44 +413,46 @@ object Heat {
         return ticksToMs(ticks, if (hz > 0) hz else 100L)
     }
 
-    private class Net(val rx: Map<Int, Long>, val tx: Map<Int, Long>, val scope: String)
+    private class Leg(val rx: Map<Int, Long>, val tx: Map<Int, Long>)
+    private class Net(val wifi: Leg?, val mobile: Leg?, val period: String?)
 
-    @Suppress("DEPRECATION")
-    private fun loadNet(c: Context, start: Long, end: Long): Net? {
-        if (!hasUsage(c)) return null
-        val nsm = c.getSystemService(NetworkStatsManager::class.java) ?: return null
-        val rx = HashMap<Int, Long>()
-        val tx = HashMap<Int, Long>()
-        val sub = if (Build.VERSION.SDK_INT >= 29) null else ""
-        val wifi = queryNet(nsm, ConnectivityManager.TYPE_WIFI, sub, start, end, rx, tx)
-        val mobile = queryNet(nsm, ConnectivityManager.TYPE_MOBILE, sub, start, end, rx, tx)
-        val anyBytes = rx.values.any { it > 0L } || tx.values.any { it > 0L }
-        // An empty successful query is "no numbers", not proof that every app transferred 0 bytes.
-        if ((!wifi && !mobile) || !anyBytes) return null
-        val scope = when {
-            wifi && mobile -> "wifi+mobile"
-            wifi -> "wifi"
-            mobile -> "mobile"
-            else -> return null
-        }
-        return Net(rx, tx, scope)
+    private fun legBytes(leg: Leg?, uid: Int?): Pair<Long?, Long?> {
+        if (leg == null || uid == null) return null to null
+        return (leg.rx[uid] ?: 0L) to (leg.tx[uid] ?: 0L)
     }
 
-    private fun queryNet(nsm: NetworkStatsManager, type: Int, sub: String?, start: Long, end: Long, rx: HashMap<Int, Long>, tx: HashMap<Int, Long>): Boolean {
+    @Suppress("DEPRECATION")
+    private fun loadNet(c: Context, start: Long, end: Long): Net {
+        if (!hasUsage(c)) return Net(null, null, null)
+        val nsm = c.getSystemService(NetworkStatsManager::class.java) ?: return Net(null, null, null)
+        val sub = if (Build.VERSION.SDK_INT >= 29) null else ""
+        val wifi = queryNet(nsm, ConnectivityManager.TYPE_WIFI, sub, start, end)
+        val mobile = queryNet(nsm, ConnectivityManager.TYPE_MOBILE, sub, start, end)
+        val period = if (wifi != null || mobile != null) "6h" else null
+        return Net(wifi, mobile, period)
+    }
+
+    /** Null when the query fails or returns no buckets. An empty success is not "every app used 0". */
+    private fun queryNet(nsm: NetworkStatsManager, type: Int, sub: String?, start: Long, end: Long): Leg? {
         var stats: NetworkStats? = null
         return try {
-            stats = nsm.querySummary(type, sub, start, end) ?: return false
+            stats = nsm.querySummary(type, sub, start, end) ?: return null
+            val rx = HashMap<Int, Long>()
+            val tx = HashMap<Int, Long>()
             val bucket = NetworkStats.Bucket()
+            var saw = false
             while (stats.hasNextBucket()) {
                 if (!stats.getNextBucket(bucket)) break
                 val uid = bucket.uid
                 if (uid < 0) continue
-                if (bucket.rxBytes >= 0) rx[uid] = (rx[uid] ?: 0L) + bucket.rxBytes
-                if (bucket.txBytes >= 0) tx[uid] = (tx[uid] ?: 0L) + bucket.txBytes
+                var counted = false
+                if (bucket.rxBytes >= 0) { rx[uid] = (rx[uid] ?: 0L) + bucket.rxBytes; counted = true }
+                if (bucket.txBytes >= 0) { tx[uid] = (tx[uid] ?: 0L) + bucket.txBytes; counted = true }
+                if (counted) saw = true
             }
-            true
+            if (saw) Leg(rx, tx) else null
         } catch (_: Exception) {
-            false
+            null
         } finally {
             try { stats?.close() } catch (_: Exception) {}
         }

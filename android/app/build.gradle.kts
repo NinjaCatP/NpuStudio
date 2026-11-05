@@ -6,7 +6,7 @@ android {
     defaultConfig {
         applicationId = "com.ninjacatp.npustudio.companion"
         minSdk = 26; targetSdk = 34
-        versionCode = 5; versionName = "2.3"
+        versionCode = 6; versionName = "2.4"
     }
     signingConfigs {
         // Sideload signing: a local keystore (see android/README.md). Not for the Play Store.

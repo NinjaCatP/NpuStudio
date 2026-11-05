@@ -441,4 +441,9 @@ Face and eye detailer (v1.6.2)
 - Memory is PSS (RSS only if the system actually returns summary.total-rss). Since Android 10, getProcessMemoryInfo is zeroed for every other UID, so on a Galaxy S24 Ultra memory is usually N/A except for NpuStudio itself.
 - CPU percent needs two samples, so it shows after a later Refresh, and only for processes this app is allowed to see (again, usually only itself). Otherwise it can show that process's CPU time since it started, or N/A. /proc for other apps is hidden. dumpsys is not used.
 - Network is Wi-Fi plus mobile bytes over the same 6 hours, from NetworkStatsManager, which Usage Access allows for apps on this user. Per-UID TrafficStats has been blocked for other apps since Android 7, so those calls are not shown as if they were the 6-hour total. If only one of Wi-Fi or mobile can be read, the card says so.
-- Needs companion shell 5 (app 2.3). A shell 4 phone still shows the Heat list and asks for this update before filling in resources. latest_shell 5. min_shell stays 1. Web UI 1.9.5.
+- Needs companion shell 5 (app 2.3) for the first resource line. latest_shell moves to 6 in 1.9.6. min_shell stays 1. Web UI 1.9.5.
+
+1.9.6 - Mobile data separate from Wi-Fi
+- Each Heat card shows Wi-Fi and mobile (cellular) bytes on their own, labeled, for the same last 6 hours as the list. N/A on a side means that query was blocked or empty, not that the app used zero. A real zero is shown as 0 B.
+- The split comes from NetworkStatsManager (Wi-Fi and mobile queried separately) when Usage Access is on. TrafficStats cannot split mobile from Wi-Fi for other apps, and since Android 7 it only returns this app's bytes since boot, so it is not used to fill a missing number.
+- Needs companion shell 6 (app 2.4). Shell 5 still shows a combined Wi-Fi + mobile total labeled as such. latest_shell 6. Web UI 1.9.6.

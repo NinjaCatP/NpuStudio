@@ -1,7 +1,7 @@
 // NpuStudio Companion web UI. Served by the desktop at /app; the Android shell (window.NpuShell) is optional.
 "use strict";
 const $ = id => document.getElementById(id);
-const UI_VERSION = "1.9.5";
+const UI_VERSION = "1.9.6";
 const Shell = window.NpuShell || null;
 const shellVersion = Shell && Shell.shellVersion ? Number(Shell.shellVersion()) : 0;
 
@@ -16,11 +16,12 @@ const key = () => localStorage.getItem("npuKey") || "";
 // ---------- API ----------
 // Identify this phone to the desktop so it shows in every Control picker (same id as the v2.1 background link).
 // Android app versionName per shell number (from android/app/build.gradle.kts); the shell only exposes its number
-const SHELL_APP = { 3: "2.1", 4: "2.2", 5: "2.3" };
+const SHELL_APP = { 3: "2.1", 4: "2.2", 5: "2.3", 6: "2.4" };
 const SHELL_BLURB = {
   3: "adds brightness, Do Not Disturb, ring modes, calls/texts, maps, notes, read aloud and Find my phone",
   4: "adds the Heat tab (recent background activity, and Stop for apps that are not needed)",
-  5: "adds memory, CPU, and network on the Heat tab where Android lets a normal app read them"
+  5: "adds memory, CPU, and network on the Heat tab where Android lets a normal app read them",
+  6: "shows mobile data separately from Wi-Fi on each Heat card (last 6 hours)"
 };
 function appVersion() { try { if (Shell && Shell.appVersion) return String(Shell.appVersion()); } catch (e) {} return shellVersion ? (SHELL_APP[shellVersion] || "") : ""; }
 const MODELS = { "SM-S928": "Galaxy S24 Ultra", "SM-S926": "Galaxy S24+", "SM-S921": "Galaxy S24", "SM-S918": "Galaxy S23 Ultra", "SM-S938": "Galaxy S25 Ultra" };
@@ -857,10 +858,20 @@ function heatCpu(a) {
   }
   return "N/A";
 }
+function heatLeg(rx, tx) {
+  if (rx == null || tx == null) return "N/A";
+  return "↓" + heatBytes(rx) + " ↑" + heatBytes(tx);
+}
 function heatNet(a) {
-  if (a.rx_bytes == null || a.tx_bytes == null) return "N/A";
-  const scope = a.network_scope === "wifi" ? " (Wi-Fi only)" : a.network_scope === "mobile" ? " (mobile only)" : "";
-  return "↓" + heatBytes(a.rx_bytes) + " ↑" + heatBytes(a.tx_bytes) + scope;
+  if (("wifi_rx_bytes" in a) || ("mobile_rx_bytes" in a)) {
+    const any = a.wifi_rx_bytes != null || a.mobile_rx_bytes != null;
+    const period = any ? (a.network_period === "since_boot" ? " · since boot" : " · last 6 h") : "";
+    return "Wi-Fi " + heatLeg(a.wifi_rx_bytes, a.wifi_tx_bytes) + " · Mobile " + heatLeg(a.mobile_rx_bytes, a.mobile_tx_bytes) + period;
+  }
+  if (a.rx_bytes == null || a.tx_bytes == null) return "Wi-Fi N/A · Mobile N/A";
+  const which = a.network_scope === "wifi" ? "Wi-Fi " : a.network_scope === "mobile" ? "Mobile " : "Wi-Fi + mobile ";
+  const missing = a.network_scope === "wifi" ? " · Mobile N/A" : a.network_scope === "mobile" ? " · Wi-Fi N/A" : "";
+  return which + heatLeg(a.rx_bytes, a.tx_bytes) + missing + " · last 6 h";
 }
 function heatShellOk() {
   return !!(Shell && typeof Shell.heatList === "function" && typeof Shell.heatStop === "function" && typeof Shell.heatAppInfo === "function" && typeof Shell.openUsageAccess === "function");
@@ -873,8 +884,8 @@ async function heatLoad() {
   try {
     if (!heatShellOk()) {
       box.innerHTML = Shell
-        ? `<p>Heat needs the NpuStudio Companion update (app 2.3, shell 5). Install <b>NpuStudio-Companion.apk</b> over this one — the note at the top of the Chat tab has the link. Pairing is kept.</p>`
-        : `<p>Heat reads Android Usage Access, which only the NpuStudio Companion app can do (shell 5). A desktop browser can't see which apps this phone used.</p>`;
+        ? `<p>Heat needs the NpuStudio Companion update (app 2.4, shell 6). Install <b>NpuStudio-Companion.apk</b> over this one — the note at the top of the Chat tab has the link. Pairing is kept.</p>`
+        : `<p>Heat reads Android Usage Access, which only the NpuStudio Companion app can do (shell 6). A desktop browser can't see which apps this phone used.</p>`;
       return;
     }
     box.innerHTML = `<p class="muted">Reading recent usage…</p>`;
@@ -899,7 +910,7 @@ async function heatLoad() {
     if (d.resources !== true) {
       const note = document.createElement("p");
       note.className = "muted small";
-      note.textContent = "Memory, CPU, and network need the companion app update (app 2.3, shell 5). This list is still recent usage only.";
+      note.textContent = "Memory, CPU, Wi-Fi, and mobile data need the companion app update (app 2.4, shell 6). This list is still recent usage only.";
       box.appendChild(note);
     }
     for (const a of apps) {
@@ -912,7 +923,7 @@ async function heatLoad() {
       if (a.fg_service_starts) bits.push("Foreground service started ×" + a.fg_service_starts);
       bits.push(a.package || "");
       el.innerHTML = `<b>${esc(a.label || a.package || "App")}</b><div class="sub">${esc(bits.filter(Boolean).join(" · "))}</div>`
-        + (d.resources === true ? `<div class="res">Memory ${esc(heatMem(a))} · CPU ${esc(heatCpu(a))} · Network ${esc(heatNet(a))}</div>` : "")
+        + (d.resources === true ? `<div class="res">Memory ${esc(heatMem(a))} · CPU ${esc(heatCpu(a))} · ${esc(heatNet(a))}</div>` : "")
         + (a.protected ? `<div class="why">Protected — ${esc(a.reason || "needed")}. No Stop.</div>` : "");
       if (!a.protected) {
         const row = document.createElement("div"); row.className = "row";
