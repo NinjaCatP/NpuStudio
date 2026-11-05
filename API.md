@@ -99,8 +99,8 @@ The NpuStudio laptop app uses a compact binary form of the same jobs: `POST /job
 
 ## Mobile web UI (`/app`) and the Android shell
 - **What's served:** `webapp/` (`index.html`, `app.js`, `app.css`, `version.json`) is served at `http://<desktop>:47860/app/` with `Cache-Control: no-cache`. Updating the desktop updates the phone, with no APK rebuild.
-- **Tabs:** Chat (with Yes/No confirms), Image Gen (including phone-wallpaper sizes), Edit/AI Change, Upscale, Monitor (desktop plus the laptop when it's online) and Desktop status. Every job shows progress and has a Cancel button.
-- **Versioning:** `version.json` holds `{ui_version, api, min_shell}`. If the shell is older than `min_shell`, the page asks the user to update the app.
+- **Tabs:** Chat (with Yes/No confirms), Image Gen (including phone-wallpaper sizes), Edit/AI Change, Upscale, Analyze, Monitor (desktop plus the laptop when it's online), Heat (recent phone app usage) and Desktop status. Every job shows progress and has a Cancel button.
+- **Versioning:** `version.json` holds `{ui_version, api, min_shell, latest_shell}`. If the shell is older than `min_shell`, the page asks the user to update the app. `latest_shell` shows an update banner when a newer shell exists; the rest of the UI keeps working. Heat needs shell 4 (`latest_shell` 4). `min_shell` stays 1.
 - **Key:** the shell opens `/app/#k=<key>`. The page saves the key in `localStorage`, removes it from the URL, and sends it as `X-Key` on every API call. `/app` itself needs no key, but it is LAN/Tailscale only.
 - **JS bridge (`window.NpuShell`, Android only, feature-detected):**
   - `shellVersion()` → int
@@ -109,7 +109,8 @@ The NpuStudio laptop app uses a compact binary form of the same jobs: `POST /job
   - `share(base64, name)` opens the Android share sheet.
   - `notify(title, text)`: the page calls it when a job finishes while the app is in the background.
   - `unpair()` forgets the pairing and shows the pairing screen.
-- **In a normal browser:** the same page works without the bridge. It falls back to a file input, a download link, the Web Share API and web notifications.
+  - Shell v4 Heat tab: `heatList()` returns JSON `{usage_access, window_hours, apps[]}` from UsageStats (recent use over 6 hours, not CPU or heat). Each app has `package`, `label`, `last_used`, `foreground_ms`, `fg_service_starts`, `in_foreground`, `protected`, `reason`. `heatStop(package)` calls `killBackgroundProcesses` when that is allowed and the app is not on screen; otherwise it opens the system App info page so the user can tap Force stop. Protected packages are refused. `heatAppInfo(package)` opens App info for a non-protected app. `openUsageAccess()` opens Usage access settings.
+- **In a normal browser:** the same page works without the bridge. It falls back to a file input, a download link, the Web Share API and web notifications. The Heat tab explains that Usage Access is only available in the Android app.
 - **Android source and build:** see `android/README.md`. For use away from home, see `TAILSCALE.md`.
 
 ## v1.2 additions

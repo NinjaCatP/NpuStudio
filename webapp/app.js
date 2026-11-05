@@ -1,7 +1,7 @@
 // NpuStudio Companion web UI. Served by the desktop at /app; the Android shell (window.NpuShell) is optional.
 "use strict";
 const $ = id => document.getElementById(id);
-const UI_VERSION = "1.9.3";
+const UI_VERSION = "1.9.4";
 const Shell = window.NpuShell || null;
 const shellVersion = Shell && Shell.shellVersion ? Number(Shell.shellVersion()) : 0;
 
@@ -16,7 +16,11 @@ const key = () => localStorage.getItem("npuKey") || "";
 // ---------- API ----------
 // Identify this phone to the desktop so it shows in every Control picker (same id as the v2.1 background link).
 // Android app versionName per shell number (from android/app/build.gradle.kts); the shell only exposes its number
-const SHELL_APP = { 3: "2.1" };
+const SHELL_APP = { 3: "2.1", 4: "2.2" };
+const SHELL_BLURB = {
+  3: "adds brightness, Do Not Disturb, ring modes, calls/texts, maps, notes, read aloud and Find my phone",
+  4: "adds the Heat tab (recent background activity, and Stop for apps that are not needed)"
+};
 function appVersion() { try { if (Shell && Shell.appVersion) return String(Shell.appVersion()); } catch (e) {} return shellVersion ? (SHELL_APP[shellVersion] || "") : ""; }
 const MODELS = { "SM-S928": "Galaxy S24 Ultra", "SM-S926": "Galaxy S24+", "SM-S921": "Galaxy S24", "SM-S918": "Galaxy S23 Ultra", "SM-S938": "Galaxy S25 Ultra" };
 function phoneModel() {
@@ -213,6 +217,7 @@ document.querySelectorAll("#tabs button").forEach(b => b.onclick = () => {
   clearInterval(monTimer);
   if (tab === "mon") { monitor(); monTimer = setInterval(monitor, 2000); }
   if (tab === "desk") desk();
+  if (tab === "heat") heatLoad();
 });
 
 // ---------- chat ----------
@@ -287,7 +292,10 @@ async function shellUpdateCheck() {
     const v = await (await fetch("version.json", { cache: "no-store" })).json();
     if (Shell && shellVersion < (v.latest_shell || v.min_shell || 1)) {
       const u = location.origin + "/app/NpuStudio-Companion.apk";
-      $("shellUpd").innerHTML = `📲 An Android app update (v${v.latest_shell === 3 ? "2.1" : v.latest_shell}) adds brightness, Do Not Disturb, ring modes, calls/texts, maps, notes, read aloud and Find my phone. Install <b>NpuStudio-Companion.apk</b> over this one: open <a href="${u}" target="_blank">${u}</a> in Chrome on this phone, or copy it from H:\\downloads on the desktop. Your pairing is kept.`;
+      const latest = v.latest_shell || v.min_shell || 1;
+      const name = SHELL_APP[latest] || latest;
+      const blurb = SHELL_BLURB[latest] || "adds new phone controls";
+      $("shellUpd").innerHTML = `📲 An Android app update (v${name}) ${blurb}. Install <b>NpuStudio-Companion.apk</b> over this one: open <a href="${u}" target="_blank">${u}</a> in Chrome on this phone, or copy it from H:\\downloads on the desktop. Your pairing is kept.`;
       $("shellUpd").classList.remove("hidden");
     }
   } catch (e) {}
@@ -805,6 +813,95 @@ async function pcRestart(id, before) {
   $("bgLink").onchange = () => { Shell.setBackground($("bgLink").checked); setTimeout(show, 1500); }; show(); setInterval(show, 15000);
 })();
 $("unpair").onclick = async () => { if (!(await ask("Forget the pairing key?"))) return; localStorage.removeItem("npuKey"); if (Shell && Shell.unpair) Shell.unpair(); else location.reload(); };
+
+// ---------- heat (shell v4): UsageStats ranking, not a CPU/heat meter ----------
+function heatAgo(t) {
+  if (!t) return "unknown time";
+  let s = Math.round((Date.now() - t) / 1000); if (s < 0) s = 0;
+  if (s < 60) return "just now";
+  if (s < 3600) return Math.round(s / 60) + " min ago";
+  if (s < 86400) return Math.round(s / 3600) + " h ago";
+  return Math.round(s / 86400) + " d ago";
+}
+function heatDur(ms) {
+  const m = Math.round((ms || 0) / 60000);
+  if (m <= 0) return "";
+  if (m < 60) return m + " min on screen";
+  return Math.floor(m / 60) + " h" + (m % 60 ? " " + (m % 60) + " min" : "") + " on screen";
+}
+function heatShellOk() {
+  return !!(Shell && typeof Shell.heatList === "function" && typeof Shell.heatStop === "function" && typeof Shell.heatAppInfo === "function" && typeof Shell.openUsageAccess === "function");
+}
+let heatBusy = false;
+async function heatLoad() {
+  const box = $("heatBox"); if (!box) return;
+  if (heatBusy) return;
+  heatBusy = true; const btn = $("heatRefresh"); if (btn) btn.disabled = true;
+  try {
+    if (!heatShellOk()) {
+      box.innerHTML = Shell
+        ? `<p>Heat needs the NpuStudio Companion update (app 2.2, shell 4). Install <b>NpuStudio-Companion.apk</b> over this one — the note at the top of the Chat tab has the link. Pairing is kept.</p>`
+        : `<p>Heat reads Android Usage Access, which only the NpuStudio Companion app can do (shell 4). A desktop browser can't see which apps this phone used.</p>`;
+      return;
+    }
+    box.innerHTML = `<p class="muted">Reading recent usage…</p>`;
+    let d; try { d = JSON.parse(Shell.heatList() || "{}"); } catch (e) { box.innerHTML = `<p class="err">Couldn't read usage. ${esc(e.message || e)}</p>`; return; }
+    if (!d.usage_access) {
+      box.innerHTML = `<p>To list recent apps, allow <b>Usage access</b> for NpuStudio Companion. Android keeps this as a special switch. It is not a normal permission popup.</p>
+        <button id="heatUsage" class="primary">Open Usage Access settings</button>
+        <p class="muted small">Turn NpuStudio on, come back to this tab, and tap Refresh. If the list stays empty, leave the app and open it again.</p>`;
+      const b = $("heatUsage"); if (b) b.onclick = () => {
+        try { const m = Shell.openUsageAccess(); if (m && /Couldn't/.test(m)) notice(m); }
+        catch (e) { notice(e.message || String(e)); }
+      };
+      return;
+    }
+    if (d.error) { box.innerHTML = `<p class="err">${esc(d.error)}</p>`; return; }
+    const apps = d.apps || [], hours = d.window_hours || 6;
+    if (!apps.length) {
+      box.innerHTML = `<p class="muted">No app usage in the last ${hours} hours. If you just turned Usage access on, leave NpuStudio and open it again, then tap Refresh.</p>`;
+      return;
+    }
+    box.innerHTML = "";
+    for (const a of apps) {
+      const el = document.createElement("div");
+      el.className = "heat-app" + (a.protected ? " prot" : "");
+      const bits = [];
+      if (a.in_foreground) bits.push("On screen (from usage events)");
+      bits.push("Last used " + heatAgo(a.last_used));
+      const dur = heatDur(a.foreground_ms); if (dur) bits.push(dur + " in the last " + hours + " h");
+      if (a.fg_service_starts) bits.push("Foreground service started ×" + a.fg_service_starts);
+      bits.push(a.package || "");
+      el.innerHTML = `<b>${esc(a.label || a.package || "App")}</b><div class="sub">${esc(bits.filter(Boolean).join(" · "))}</div>`
+        + (a.protected ? `<div class="why">Protected — ${esc(a.reason || "needed")}. No Stop.</div>` : "");
+      if (!a.protected) {
+        const row = document.createElement("div"); row.className = "row";
+        const stop = document.createElement("button"); stop.className = "primary"; stop.textContent = "Stop";
+        const info = document.createElement("button"); info.className = "ghost"; info.textContent = "App info";
+        stop.onclick = async () => {
+          const name = a.label || a.package;
+          if (!(await ask(`Stop background processes for ${name}? This clears background processes when Android allows it. It is not a full Force stop. If Android can't, App info opens so you can tap Force stop.`))) return;
+          stop.disabled = true;
+          try {
+            const r = JSON.parse(Shell.heatStop(a.package) || "{}");
+            await notice(r.message || "Done.");
+          } catch (e) { await notice(e.message || String(e)); }
+          stop.disabled = false;
+          heatLoad();
+        };
+        info.onclick = () => {
+          try {
+            const r = JSON.parse(Shell.heatAppInfo(a.package) || "{}");
+            if (r && r.ok === false) notice(r.message || "Couldn't open App info.");
+          } catch (e) { notice(e.message || String(e)); }
+        };
+        row.appendChild(stop); row.appendChild(info); el.appendChild(row);
+      }
+      box.appendChild(el);
+    }
+  } finally { heatBusy = false; if (btn) btn.disabled = false; }
+}
+if ($("heatRefresh")) $("heatRefresh").onclick = () => heatLoad();
 
 // ---------- start ----------
 async function start() {

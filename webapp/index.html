@@ -4,7 +4,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#14161c">
 <title>NpuStudio Companion</title>
-<link rel="stylesheet" href="app.css?v=1.9.2">
+<link rel="stylesheet" href="app.css?v=1.9.4">
 </head><body>
 <header><div class="brand"><span class="logo">N</span> NpuStudio</div><button id="conn" class="pill">🔗 …</button></header>
 
@@ -153,6 +153,13 @@
 
 <section id="tab-mon" class="page hidden"><div class="row" id="vramBar" style="gap:6px;flex-wrap:wrap"><b class="grow">🧹 Clear VRAM</b><button class="ghost" data-vram="desktop">Desktop</button><button class="ghost" data-vram="laptop">Laptop</button><button class="ghost" data-vram="both">Both PCs</button></div><div id="vramMsg" class="small"></div><div id="monBox"></div><p class="muted small">Updates every 2 s. The laptop appears when its NpuStudio app is open and paired.</p></section>
 
+<section id="tab-heat" class="page hidden">
+  <div class="row" style="align-items:center"><b class="grow">Recent background activity</b><button id="heatRefresh" class="ghost">Refresh</button></div>
+  <p class="muted small">Ranked from Android Usage Access over the last 6 hours. Modern Android does not give third-party apps a reliable live per-app CPU or battery-heat meter, so this is recent usage, not a proven heat cause.</p>
+  <p class="muted small">Google Maps navigation still needs this phone's GPS, so this mainly helps other background junk. Maps, Tailscale, NpuStudio, phone and messages, the home screen, the keyboard, and system core are shown greyed and can't be stopped here.</p>
+  <div id="heatBox"></div>
+</section>
+
 <section id="tab-desk" class="page hidden"><div id="deskBox"></div>
   <h3>NpuStudio apps</h3><div id="pcsBox"></div><p class="small muted">↻ Restart closes and reopens the NpuStudio app only, never the PC.</p>
   <button id="deskRe" class="ghost">Refresh</button>
@@ -169,10 +176,11 @@
   <button data-t="up">🔍<span>Upscale</span></button>
   <button data-t="ana">🧠<span>Analyze</span></button>
   <button data-t="mon">📈<span>Monitor</span></button>
+  <button data-t="heat">🌡️<span>Heat</span></button>
   <button data-t="desk">🖥️<span>Desktop</span></button>
 </nav>
 
 <div id="dlg" class="dlg hidden"><div class="card"><p id="dlgQ"></p><div class="row"><button id="dlgNo" class="grow">No</button><button id="dlgYes" class="primary grow">Yes</button></div></div></div>
 <input type="file" id="fileIn" accept="image/*" class="hidden">
-<script src="app.js?v=1.9.2"></script>
+<script src="app.js?v=1.9.4"></script>
 </body></html>
