@@ -5,7 +5,7 @@ import android.net.Uri
 
 /** Pairing storage and the "home network or Tailscale only" rule for every address the app talks to. */
 object HostRules {
-    const val SHELL_VERSION = 6
+    const val SHELL_VERSION = 7
 
     fun allowed(host: String?): Boolean {
         val h = (host ?: return false).lowercase().trim('[', ']')
