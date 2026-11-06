@@ -1,7 +1,7 @@
 // NpuStudio Companion web UI. Served by the desktop at /app; the Android shell (window.NpuShell) is optional.
 "use strict";
 const $ = id => document.getElementById(id);
-const UI_VERSION = "1.9.6";
+const UI_VERSION = "1.9.7";
 const Shell = window.NpuShell || null;
 const shellVersion = Shell && Shell.shellVersion ? Number(Shell.shellVersion()) : 0;
 
@@ -16,12 +16,10 @@ const key = () => localStorage.getItem("npuKey") || "";
 // ---------- API ----------
 // Identify this phone to the desktop so it shows in every Control picker (same id as the v2.1 background link).
 // Android app versionName per shell number (from android/app/build.gradle.kts); the shell only exposes its number
-const SHELL_APP = { 3: "2.1", 4: "2.2", 5: "2.3", 6: "2.4" };
+const SHELL_APP = { 3: "2.1", 4: "2.2", 5: "2.3", 6: "2.4", 7: "2.5" };
 const SHELL_BLURB = {
   3: "adds brightness, Do Not Disturb, ring modes, calls/texts, maps, notes, read aloud and Find my phone",
-  4: "adds the Heat tab (recent background activity, and Stop for apps that are not needed)",
-  5: "adds memory, CPU, and network on the Heat tab where Android lets a normal app read them",
-  6: "shows mobile data separately from Wi-Fi on each Heat card (last 6 hours)"
+  7: "moves Heat to the separate Heat Guard app. Pairing, Monitor, Chat, and the other tabs stay here"
 };
 function appVersion() { try { if (Shell && Shell.appVersion) return String(Shell.appVersion()); } catch (e) {} return shellVersion ? (SHELL_APP[shellVersion] || "") : ""; }
 const MODELS = { "SM-S928": "Galaxy S24 Ultra", "SM-S926": "Galaxy S24+", "SM-S921": "Galaxy S24", "SM-S918": "Galaxy S23 Ultra", "SM-S938": "Galaxy S25 Ultra" };
@@ -219,7 +217,6 @@ document.querySelectorAll("#tabs button").forEach(b => b.onclick = () => {
   clearInterval(monTimer);
   if (tab === "mon") { monitor(); monTimer = setInterval(monitor, 2000); }
   if (tab === "desk") desk();
-  if (tab === "heat") heatLoad();
 });
 
 // ---------- chat ----------
@@ -815,144 +812,6 @@ async function pcRestart(id, before) {
   $("bgLink").onchange = () => { Shell.setBackground($("bgLink").checked); setTimeout(show, 1500); }; show(); setInterval(show, 15000);
 })();
 $("unpair").onclick = async () => { if (!(await ask("Forget the pairing key?"))) return; localStorage.removeItem("npuKey"); if (Shell && Shell.unpair) Shell.unpair(); else location.reload(); };
-
-// ---------- heat (shell v4): UsageStats ranking, not a CPU/heat meter ----------
-function heatAgo(t) {
-  if (!t) return "unknown time";
-  let s = Math.round((Date.now() - t) / 1000); if (s < 0) s = 0;
-  if (s < 60) return "just now";
-  if (s < 3600) return Math.round(s / 60) + " min ago";
-  if (s < 86400) return Math.round(s / 3600) + " h ago";
-  return Math.round(s / 86400) + " d ago";
-}
-function heatDur(ms) {
-  const m = Math.round((ms || 0) / 60000);
-  if (m <= 0) return "";
-  if (m < 60) return m + " min on screen";
-  return Math.floor(m / 60) + " h" + (m % 60 ? " " + (m % 60) + " min" : "") + " on screen";
-}
-function heatBytes(n) {
-  const v = Number(n);
-  if (!isFinite(v) || v < 0) return "N/A";
-  if (v < 1000) return Math.round(v) + " B";
-  if (v < 1e6) return (Math.round(v / 100) / 10).toString().replace(/\.0$/, "") + " KB";
-  if (v < 1e9) return (Math.round(v / 1e5) / 10).toString().replace(/\.0$/, "") + " MB";
-  return (Math.round(v / 1e8) / 10).toString().replace(/\.0$/, "") + " GB";
-}
-function heatMb(kb) {
-  const mb = Number(kb) / 1024;
-  if (!isFinite(mb) || mb < 0) return "N/A";
-  if (mb < 10) return (Math.round(mb * 10) / 10).toString().replace(/\.0$/, "") + " MB";
-  return Math.round(mb) + " MB";
-}
-function heatMem(a) {
-  if (a.rss_kb != null && Number(a.rss_kb) > 0) return heatMb(a.rss_kb) + " RSS";
-  if (a.pss_kb != null) return heatMb(a.pss_kb) + " PSS";
-  return "N/A";
-}
-function heatCpu(a) {
-  if (a.cpu_pct != null && isFinite(Number(a.cpu_pct))) return (Math.round(Number(a.cpu_pct) * 10) / 10).toString().replace(/\.0$/, "") + "%";
-  if (a.cpu_time_ms != null && isFinite(Number(a.cpu_time_ms))) {
-    const s = Number(a.cpu_time_ms) / 1000;
-    return (s < 10 ? (Math.round(s * 10) / 10).toString().replace(/\.0$/, "") : String(Math.round(s))) + " s since start";
-  }
-  return "N/A";
-}
-function heatLeg(rx, tx) {
-  if (rx == null || tx == null) return "N/A";
-  return "↓" + heatBytes(rx) + " ↑" + heatBytes(tx);
-}
-function heatNet(a) {
-  if (("wifi_rx_bytes" in a) || ("mobile_rx_bytes" in a)) {
-    const any = a.wifi_rx_bytes != null || a.mobile_rx_bytes != null;
-    const period = any ? (a.network_period === "since_boot" ? " · since boot" : " · last 6 h") : "";
-    return "Wi-Fi " + heatLeg(a.wifi_rx_bytes, a.wifi_tx_bytes) + " · Mobile " + heatLeg(a.mobile_rx_bytes, a.mobile_tx_bytes) + period;
-  }
-  if (a.rx_bytes == null || a.tx_bytes == null) return "Wi-Fi N/A · Mobile N/A";
-  const which = a.network_scope === "wifi" ? "Wi-Fi " : a.network_scope === "mobile" ? "Mobile " : "Wi-Fi + mobile ";
-  const missing = a.network_scope === "wifi" ? " · Mobile N/A" : a.network_scope === "mobile" ? " · Wi-Fi N/A" : "";
-  return which + heatLeg(a.rx_bytes, a.tx_bytes) + missing + " · last 6 h";
-}
-function heatShellOk() {
-  return !!(Shell && typeof Shell.heatList === "function" && typeof Shell.heatStop === "function" && typeof Shell.heatAppInfo === "function" && typeof Shell.openUsageAccess === "function");
-}
-let heatBusy = false;
-async function heatLoad() {
-  const box = $("heatBox"); if (!box) return;
-  if (heatBusy) return;
-  heatBusy = true; const btn = $("heatRefresh"); if (btn) btn.disabled = true;
-  try {
-    if (!heatShellOk()) {
-      box.innerHTML = Shell
-        ? `<p>Heat needs the NpuStudio Companion update (app 2.4, shell 6). Install <b>NpuStudio-Companion.apk</b> over this one — the note at the top of the Chat tab has the link. Pairing is kept.</p>`
-        : `<p>Heat reads Android Usage Access, which only the NpuStudio Companion app can do (shell 6). A desktop browser can't see which apps this phone used.</p>`;
-      return;
-    }
-    box.innerHTML = `<p class="muted">Reading recent usage…</p>`;
-    let d; try { d = JSON.parse(Shell.heatList() || "{}"); } catch (e) { box.innerHTML = `<p class="err">Couldn't read usage. ${esc(e.message || e)}</p>`; return; }
-    if (!d.usage_access) {
-      box.innerHTML = `<p>To list recent apps, allow <b>Usage access</b> for NpuStudio Companion. Android keeps this as a special switch. It is not a normal permission popup.</p>
-        <button id="heatUsage" class="primary">Open Usage Access settings</button>
-        <p class="muted small">Turn NpuStudio on, come back to this tab, and tap Refresh. If the list stays empty, leave the app and open it again.</p>`;
-      const b = $("heatUsage"); if (b) b.onclick = () => {
-        try { const m = Shell.openUsageAccess(); if (m && /Couldn't/.test(m)) notice(m); }
-        catch (e) { notice(e.message || String(e)); }
-      };
-      return;
-    }
-    if (d.error) { box.innerHTML = `<p class="err">${esc(d.error)}</p>`; return; }
-    const apps = d.apps || [], hours = d.window_hours || 6;
-    if (!apps.length) {
-      box.innerHTML = `<p class="muted">No app usage in the last ${hours} hours. If you just turned Usage access on, leave NpuStudio and open it again, then tap Refresh.</p>`;
-      return;
-    }
-    box.innerHTML = "";
-    if (d.resources !== true) {
-      const note = document.createElement("p");
-      note.className = "muted small";
-      note.textContent = "Memory, CPU, Wi-Fi, and mobile data need the companion app update (app 2.4, shell 6). This list is still recent usage only.";
-      box.appendChild(note);
-    }
-    for (const a of apps) {
-      const el = document.createElement("div");
-      el.className = "heat-app" + (a.protected ? " prot" : "");
-      const bits = [];
-      if (a.in_foreground) bits.push("On screen (from usage events)");
-      bits.push("Last used " + heatAgo(a.last_used));
-      const dur = heatDur(a.foreground_ms); if (dur) bits.push(dur + " in the last " + hours + " h");
-      if (a.fg_service_starts) bits.push("Foreground service started ×" + a.fg_service_starts);
-      bits.push(a.package || "");
-      el.innerHTML = `<b>${esc(a.label || a.package || "App")}</b><div class="sub">${esc(bits.filter(Boolean).join(" · "))}</div>`
-        + (d.resources === true ? `<div class="res">Memory ${esc(heatMem(a))} · CPU ${esc(heatCpu(a))} · ${esc(heatNet(a))}</div>` : "")
-        + (a.protected ? `<div class="why">Protected — ${esc(a.reason || "needed")}. No Stop.</div>` : "");
-      if (!a.protected) {
-        const row = document.createElement("div"); row.className = "row";
-        const stop = document.createElement("button"); stop.className = "primary"; stop.textContent = "Stop";
-        const info = document.createElement("button"); info.className = "ghost"; info.textContent = "App info";
-        stop.onclick = async () => {
-          const name = a.label || a.package;
-          if (!(await ask(`Stop background processes for ${name}? This clears background processes when Android allows it. It is not a full Force stop. If Android can't, App info opens so you can tap Force stop.`))) return;
-          stop.disabled = true;
-          try {
-            const r = JSON.parse(Shell.heatStop(a.package) || "{}");
-            await notice(r.message || "Done.");
-          } catch (e) { await notice(e.message || String(e)); }
-          stop.disabled = false;
-          heatLoad();
-        };
-        info.onclick = () => {
-          try {
-            const r = JSON.parse(Shell.heatAppInfo(a.package) || "{}");
-            if (r && r.ok === false) notice(r.message || "Couldn't open App info.");
-          } catch (e) { notice(e.message || String(e)); }
-        };
-        row.appendChild(stop); row.appendChild(info); el.appendChild(row);
-      }
-      box.appendChild(el);
-    }
-  } finally { heatBusy = false; if (btn) btn.disabled = false; }
-}
-if ($("heatRefresh")) $("heatRefresh").onclick = () => heatLoad();
 
 // ---------- start ----------
 async function start() {
